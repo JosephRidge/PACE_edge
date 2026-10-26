@@ -1,0 +1,36 @@
+{
+  "data_dir": "~/proparco-data",
+  "threads": 4,
+  "api_key": "auto",
+  "internal_domains": [
+    "proparco.fr",
+    "afd.fr"
+  ],
+  "generation": {
+    "binary": "models/Ministral-3-3B-Instruct-2512-Q4_K_M.llamafile",
+    "model": null,
+    "port": 8081,
+    "ctx_size": 8192,
+    "startup_timeout": 360,
+    "extra_args": [],
+    "batch_chars": 18000,
+    "max_tokens": 1000
+  },
+  "embedding": {
+    "binary": "bin/llamafile-0.10.6-thin",
+    "model": "models/bge-m3-q8.gguf",
+    "embedding": true,
+    "port": 8082,
+    "ctx_size": 2048,
+    "dimension": 1024,
+    "doc_prefix": "",
+    "query_prefix": "",
+    "startup_timeout": 120,
+    "extra_args": [
+      "-b",
+      "1024",
+      "-ub",
+      "1024"
+    ]
+  }
+}

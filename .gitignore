@@ -1,0 +1,7 @@
+env
+.env
+proparco-data
+
+#  ignored in versiona contro due to the size
+proparco-drive/models/bge-m3-q8.gguf
+proparco-drive/models/Ministral-3-3B-Instruct-2512-Q4_K_M.llamafile
