@@ -1,0 +1,35 @@
+{
+  "_how_to": [
+    "One entry per thread. Use the thread ID prefix from 'generate.py --list'.",
+    "must_mention: facts a correct result MUST contain (amounts, names, key terms), checked case- and accent-insensitively.",
+    "must_not_mention: things that would be wrong (invented names, wrong amounts, admin noise).",
+    "expect_deal_update: true if at least one email in the thread is a real deal update.",
+    "expect_open_steps: number of actions still open after the last email (omit if unsure).",
+    "Entries whose thread starts with REPLACE are ignored. Aim for 10-15 varied threads."
+  ],
+  "threads": [
+    {
+      "thread": "3880F8DB30E5",
+      "description": "NBC Tanzania USD 25m senior loan signing announcement",
+      "must_mention": ["25", "NBC", "senior loan", "Tanzania"],
+      "must_not_mention": ["ÉDO", "CHEVALIER"],
+      "expect_deal_update": true,
+      "expect_open_steps": 0
+    },
+    {
+      "thread": "REPLACE-monthly-report",
+      "description": "East Africa monthly report (CR mai 2026): several deals, FR/EN",
+      "must_mention": ["CRDB", "ETG"],
+      "must_not_mention": [],
+      "expect_deal_update": true
+    },
+    {
+      "thread": "REPLACE-admin-thread",
+      "description": "Admin/event thread (e.g. attendance list): should NOT become a deal",
+      "must_mention": ["Awaiting future deal"],
+      "must_not_mention": ["NEW UPDATE"],
+      "expect_deal_update": false,
+      "expect_open_steps": 0
+    }
+  ]
+}
