@@ -1,7 +1,26 @@
-env
-.env
-proparco-data
+# Client data - never commit
+proparco-data/
+proparco-data.old/
+**/acquisitions/
+*.db
+*.db-wal
+*.db-shm
+**/logs/
+**/summaries/
 
-#  ignored in versiona contro due to the size
-proparco-drive/models/bge-m3-q8.gguf
-proparco-drive/models/Ministral-3-3B-Instruct-2512-Q4_K_M.llamafile
+# Build output, environments, caches
+dist/
+env/
+.venv/
+__pycache__/
+*.pyc
+
+# Large binaries and models (rebuildable / downloadable)
+*.gguf
+*.llamafile
+**/bin/llamafile*
+proparco-drive/python/
+
+# Secrets (e.g. the Notion token later)
+.env
+config/secrets*
