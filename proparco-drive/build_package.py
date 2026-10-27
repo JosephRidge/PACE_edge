@@ -44,7 +44,7 @@ MINISTRAL_LLAMAFILE = "Ministral-3-3B-Instruct-2512-Q4_K_M.llamafile"
 MINISTRAL_GGUF = "Ministral-3-3B-Instruct-2512-Q4_K_M.gguf"
 EMBED_GGUF = "bge-m3-q8.gguf"
 SCRIPTS = ["engine.py", "embed.py", "generate.py", "verify.py", "obs.py", "search.py",
-           "eval.py", "menu.py"]
+           "eval.py", "menu.py", "viewer.py", "gmail_acquire.py", "outlook_acquire.ps1"]
 
 
 def step(msg):
@@ -140,11 +140,21 @@ def main():
 
     out_root = Path(args.out).expanduser().resolve()
     drive = out_root / "proparco-drive"
+    default_out = (SRC.parent / "dist").resolve()
+    if args.with_data and out_root != default_out:
+        sys.exit("--with-data only works with the default output folder (../dist).\n"
+                 "It copies client emails, which must never be written to a flash disk.\n"
+                 "Build onto the disk without --with-data, and copy the data to the laptop "
+                 "separately.")
     if drive.exists():
         sys.exit(f"{drive} already exists. Remove it or choose another --out.")
 
     step("Checking source files")
-    needed = [SRC / "bin" / ENGINE, SRC / "models" / EMBED_GGUF,
+    # On Windows the engine is saved as .exe; accept either name.
+    engine_src = SRC / "bin" / ENGINE
+    if not engine_src.exists() and (SRC / "bin" / f"{ENGINE}.exe").exists():
+        engine_src = SRC / "bin" / f"{ENGINE}.exe"
+    needed = [engine_src, SRC / "models" / EMBED_GGUF,
               SRC / "config" / "settings.json", SRC / "start.sh", SRC / "start.bat"]
     needed += [SRC / "scripts" / s for s in SCRIPTS]
     ministral_src = SRC / "models" / MINISTRAL_GGUF
@@ -165,7 +175,7 @@ def main():
     step("Scripts, launchers and config")
     for s in SCRIPTS:
         copy(SRC / "scripts" / s, drive / "scripts" / s)
-    for f in ("start.sh", "start.bat", "SETUP.md"):
+    for f in ("start.sh", "start.bat", "README.md", "SETUP.md"):
         if (SRC / f).exists():
             copy(SRC / f, drive / f)
     (drive / "start.sh").chmod(0o755)
@@ -174,9 +184,9 @@ def main():
     write_settings(SRC / "config" / "settings.json", drive / "config" / "settings.json")
 
     step("Model engine (one file, two names)")
-    copy(SRC / "bin" / ENGINE, drive / "bin" / ENGINE)
+    copy(engine_src, drive / "bin" / ENGINE)
     (drive / "bin" / ENGINE).chmod(0o755)
-    copy(SRC / "bin" / ENGINE, drive / "bin" / f"{ENGINE}.exe")
+    copy(engine_src, drive / "bin" / f"{ENGINE}.exe")
 
     step("Models")
     if ministral_src.exists():
