@@ -12,7 +12,8 @@ The AI runs offline from a flash disk; email content never leaves the computer.
    (Windows: type `%USERPROFILE%` in File Explorer's address bar).
 2. Open `proparco-drive` on the flash disk and start it:
    **Windows** double-click `start.bat`, **Linux** `sh start.sh`.
-3. Choose **1** (health check) the first time, then **14** to browse the results in your browser.
+3. Choose **1** (health check) the first time. To add emails, select them in Outlook and choose **15**.
+   Choose **14** to browse the results in your browser.
 4. Choose **0** to exit, and eject the flash disk before unplugging.
 
 Full client guide: [SETUP.md, Part 1](SETUP.md#part-1-clients-plug-and-play).

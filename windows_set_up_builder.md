@@ -201,6 +201,7 @@ listen on this computer and work without network access.
 | 12 | Log dashboard in the browser |
 | 13 | Quality evaluation |
 | 14 | Browse threads in the browser (viewer) |
+| 15 | Fetch emails from Outlook or Gmail, then embed |
 
 Every script can also be run directly, for example `& $py scripts\generate.py --list`.
 

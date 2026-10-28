@@ -66,9 +66,12 @@ Loading the models from the flash disk can take a minute.
 | 12 | Open the log dashboard (charts) in the browser |
 | 13 | Quality evaluation against the hand-written facts |
 | 14 | Browse threads in the browser: title, people, the three fields, emails, attachment links |
+| 15 | Fetch emails: the ones selected in Outlook, the last N days, or Gmail; then embed them |
 | 0 | Exit |
 
-For options 6 and 8, type the start of a thread ID, as shown by option 4.
+Options 6 and 8 first list the threads; type a thread's number from that list (or the start of its ID).
+
+**Getting new emails (option 15):** in Outlook, select the emails you want (Ctrl+click), then choose 15 → 1. The menu exports them, then offers to embed them. Classic Outlook must be open; the "new Outlook" app is not supported.
 
 ## Reading the results
 

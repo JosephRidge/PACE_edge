@@ -11,6 +11,18 @@ fi
 
 # Bundled packages (sqlite-vec) for Linux live on the drive; nothing is installed system-wide.
 export PYTHONPATH="$(pwd)/python/lib-linux${PYTHONPATH:+:$PYTHONPATH}"
+
+# Developer folders have no bundled sqlite-vec: use an activated environment instead.
+if ! "$PY" -c "import sqlite_vec" >/dev/null 2>&1; then
+    echo "sqlite-vec is not available to $PY."
+    echo "  Built flash disk: rebuild it with build_package.py (python/lib-linux is missing)."
+    echo "  Developer folder: activate your environment first, e.g."
+    echo "      source ../env/bin/activate && sh start.sh"
+    echo "Embedding, generation and search need it; the health check does not."
+    printf "Continue anyway? [y/N] "
+    read -r answer
+    [ "$answer" = "y" ] || [ "$answer" = "Y" ] || exit 1
+fi
 export PYTHONUTF8=1
 # Local model servers must never go through a proxy.
 export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
