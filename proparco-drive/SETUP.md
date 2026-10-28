@@ -25,18 +25,17 @@ Nothing to install. Everything needed is on the flash disk.
 
 - Windows 10 or 11 (64-bit), or Linux
 - 8 GB of memory (16 GB is better)
-- The flash disk, and the `proparco-data` folder from the project team
+- The flash disk
+- Classic Outlook, open and signed in (to fetch emails)
 
-## First time only: put the data folder in place
+## First time only
 
-The data stays on your computer's own disk, never on the flash disk.
+The first time you start the assistant on a computer, it offers to create its data folder:
+`C:\Users\<you>\proparco-data` on Windows, `~/proparco-data` on Linux. Answer **Y**.
 
-**Windows**
-
-1. Open File Explorer, type `%USERPROFILE%` in the address bar and press Enter.
-2. Copy the `proparco-data` folder there. It is now at `C:\Users\<you>\proparco-data`.
-
-**Linux:** copy it to your home folder, so it is at `~/proparco-data`.
+This folder holds your emails, results and logs. It is on your computer's own disk, never on
+the flash disk, and it starts empty: the assistant only ever works with emails you fetch
+yourself (option 15).
 
 ## Every time
 
@@ -49,6 +48,10 @@ The data stays on your computer's own disk, never on the flash disk.
 
 The first time, choose **1 (Health check)**. It should end with `Embedding check: PASS`.
 Loading the models from the flash disk can take a minute.
+
+Then fetch your first emails: in Outlook, select a few emails of one deal (Ctrl+click), and
+choose **15 → 1**. Accept the offer to embed them, then use **6** to generate the three fields
+and **14** to read them. The status line at the top of the menu always says what to do next.
 
 ## The menu
 
@@ -98,7 +101,7 @@ Unplugging without ejecting can make the disk unreadable on Linux until it is re
 | The antivirus blocks or removes a file | **Stop.** Contact the project team or IT. Do not try to get around it |
 | "Windows protected your PC" | Do not click "Run anyway" on a work laptop. Contact the project team |
 | A firewall question about `llamafile` | Click **Cancel**. It only talks to this computer |
-| "No database" or no threads listed | The data folder is missing or in the wrong place. Check the path at the top of the menu |
+| "No database" or no threads listed | No emails fetched yet, or the data folder is elsewhere. Check the status line and path at the top of the menu; fetch emails with **15** |
 | Strange symbols instead of ✓ or — | Display only. The stored results are correct |
 | Anything else | Choose **11** and send the message shown to the project team |
 
@@ -184,8 +187,10 @@ Set at least:
 
 **5. Data**
 
-Put existing data in `data_dir` (`acquisitions/`, `db/`, `logs/`). For new acquisitions,
-place each run folder (with `acquisition.json`) in `acquisitions/`.
+Clients always start empty and fetch fresh emails (menu option 15). For development and
+evaluation, you may use a test data folder in `data_dir` (`acquisitions/`, `db/`, `logs/`).
+Test data contains real client emails: keep it on your own machine only, never on a flash
+disk or a client laptop, and delete it when the project ends or as agreed with the client.
 
 ## 2.3 Test, in stages
 
@@ -258,6 +263,35 @@ sh start.sh
 
 To measure the real start-up time, eject and re-plug the disk first; otherwise the models
 are still cached in memory.
+
+**What goes on a flash disk:** only the `proparco-drive` folder exactly as the build makes it
+(about 2.9 GB): launchers, guides, `VERSION.txt`, `SHA256SUMS.txt`, `config/`, `scripts/`
+(including both email extractors), `bin/` (the engine, Linux and `.exe`), `models/` (the two
+GGUF files) and `python/` (portable Windows Python, sqlite-vec for both systems).
+
+**Never on a flash disk:**
+
+| Item | Why, and where it belongs |
+|---|---|
+| `proparco-data/` (emails, `proparco.db`, logs, `viewer.html`, dashboard) | Client data; created on each laptop at first run |
+| Test data or earlier email exports | Real client emails; the developer's machine only |
+| The `.llamafile` (3.4 GB) | Not needed; the package uses the extracted GGUF |
+| `env/`, `.git/`, `dist/`, `__pycache__/` | Developer files |
+| Tokens or passwords (e.g. Notion, later) | Secrets; never stored on a disk that travels |
+
+**Check every disk before handing it over** (the `find` line must print nothing):
+
+```bash
+STICK=/media/<you>/<disk>
+ls "$STICK"
+find "$STICK" \( -name "*.db" -o -name "acquisition.json" -o -name "viewer.html" -o -name "*.llamafile" \) 2>/dev/null
+cd "$STICK/proparco-drive" && sha256sum -c SHA256SUMS.txt --quiet && echo "All files OK"
+cat VERSION.txt
+```
+
+**One build, many disks.** Build once, then copy `dist/proparco-drive` to each disk and check it.
+Rebuild only after changing code, settings, guides or models; each rebuild writes a new
+`VERSION.txt` (date, code commit, prompt version), so you can tell which build a disk carries.
 
 ## 2.6 Settings reference (`config/settings.json`)
 

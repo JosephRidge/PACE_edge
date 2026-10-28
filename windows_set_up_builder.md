@@ -166,10 +166,10 @@ Create the data folder:
 
 Then either:
 
-- copy an existing data folder from the project lead into `$HOME\proparco-data`
-  (it contains client emails: only if you are allowed to see them), or
-- put new acquisition run folders (each containing `acquisition.json`) into
-  `$HOME\proparco-data\acquisitions`.
+- fetch fresh emails with menu option 15 (Outlook or Gmail), which is how clients work, or
+- for testing only, copy a test data folder from the project lead into `$HOME\proparco-data`
+  (it contains client emails: only if you are allowed to see them, and never onto a client
+  laptop or a flash disk).
 
 ## 7. Run it
 
@@ -290,6 +290,17 @@ $bad = Get-Content SHA256SUMS.txt | ForEach-Object {
   if ((Get-FileHash $file -Algorithm SHA256).Hash -ne $hash.ToUpper()) { $file } }
 if ($bad) { "Changed or missing: $bad" } else { "All files OK" }
 ```
+
+Make sure no client data or unneeded files are on the disk (this must print nothing), and see
+which build it carries:
+
+```powershell
+Get-ChildItem E:\ -Recurse -File -Include *.db, acquisition.json, viewer.html, *.llamafile -ErrorAction SilentlyContinue | Select-Object FullName
+Get-Content E:\proparco-drive\VERSION.txt
+```
+
+Only the `proparco-drive` folder belongs on the disk; see `SETUP.md` section 2.5 for the full
+list of what must never be there.
 
 Then test it the way a client will: double-click `E:\proparco-drive\start.bat`
 (see `SETUP.md`, Part 1). Eject the disk properly before unplugging it.

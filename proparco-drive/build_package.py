@@ -116,6 +116,30 @@ def write_settings(src_settings, dst_settings):
     print("   settings.json written (data_dir = ~/proparco-data, both models via the engine)")
 
 
+def write_version(drive):
+    """Record what this build is, so a stick in circulation can always be identified."""
+    import datetime
+    import platform
+    import re as _re
+    commit = "unknown"
+    try:
+        commit = subprocess.run(["git", "-C", str(SRC), "rev-parse", "--short", "HEAD"],
+                                capture_output=True, text=True, timeout=10).stdout.strip() or commit
+    except (OSError, subprocess.SubprocessError):
+        pass
+    gen = (SRC / "scripts" / "generate.py").read_text(encoding="utf-8")
+    m = _re.search(r'PROMPT_VERSION = "([^"]+)"', gen)
+    lines = [f"Build date:      {datetime.datetime.now():%Y-%m-%d %H:%M}",
+             f"Built on:        {platform.node()} ({platform.system()})",
+             f"Code commit:     {commit}",
+             f"Prompt version:  {m.group(1) if m else 'unknown'}",
+             f"Engine:          {ENGINE}",
+             f"Writer model:    {MINISTRAL_GGUF}",
+             f"Search model:    {EMBED_GGUF}"]
+    (drive / "VERSION.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print("   " + "\n   ".join(lines))
+
+
 def checksums(root):
     lines = []
     for f in sorted(p for p in root.rglob("*") if p.is_file() and p.name != "SHA256SUMS.txt"):
@@ -211,6 +235,9 @@ def main():
         shutil.copytree(data_src, data_dst,
                         ignore=shutil.ignore_patterns("*.db-wal", "*.db-shm", "proparco_v*.db"))
         print(f"   copied {data_src} -> {data_dst}")
+
+    step("Version")
+    write_version(drive)
 
     step("Checksums")
     checksums(drive)

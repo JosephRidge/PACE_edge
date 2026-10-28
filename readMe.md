@@ -8,13 +8,12 @@ The AI runs offline from a flash disk; email content never leaves the computer.
 
 ## Received a ready flash disk? (clients)
 
-1. Copy the `proparco-data` folder to your home folder
-   (Windows: type `%USERPROFILE%` in File Explorer's address bar).
-2. Open `proparco-drive` on the flash disk and start it:
+1. Open `proparco-drive` on the flash disk and start it:
    **Windows** double-click `start.bat`, **Linux** `sh start.sh`.
-3. Choose **1** (health check) the first time. To add emails, select them in Outlook and choose **15**.
+   The first time, it creates an empty data folder on this computer (never on the flash disk).
+2. Choose **1** (health check) the first time. To add emails, select them in Outlook and choose **15**.
    Choose **14** to browse the results in your browser.
-4. Choose **0** to exit, and eject the flash disk before unplugging.
+3. Choose **0** to exit, and eject the flash disk before unplugging.
 
 Full client guide: [SETUP.md, Part 1](SETUP.md#part-1-clients-plug-and-play).
 
@@ -34,3 +33,6 @@ python3 build_package.py --out /media/<you>/<disk> # build a flash disk
 ```
 
 Full builder guide (testing, database, troubleshooting): [SETUP.md, Part 2](SETUP.md#part-2-builders-and-testers).
+
+**A flash disk holds only the built `proparco-drive` folder: never emails, databases or test data.**
+What belongs on it, and how to check a disk before handing it over: [SETUP.md, section 2.5](SETUP.md#25-build-a-flash-disk).
