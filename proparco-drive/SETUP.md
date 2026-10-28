@@ -43,8 +43,12 @@ yourself (option 15).
 2. Start the assistant:
    - **Windows:** double-click `start.bat`
    - **Linux:** open a terminal in that folder and type `sh start.sh`
-3. A menu appears. The first line under the title shows the data folder in use. Check it is yours.
-4. Type a number and press Enter.
+3. On Windows, it first asks **"Process the emails selected in Outlook now?"** Select the
+   emails in Outlook (Ctrl+click), answer **Y**, and it fetches them, makes them searchable,
+   summarises those threads and opens the results in your browser. Answer **N** to go straight
+   to the menu.
+4. The menu shows the data folder and a status line (what to do next). Type a number and
+   press Enter.
 
 The first time, choose **1 (Health check)**. It should end with `Embedding check: PASS`.
 Loading the models from the flash disk can take a minute.
@@ -70,6 +74,7 @@ and **14** to read them. The status line at the top of the menu always says what
 | 13 | Quality evaluation against the hand-written facts |
 | 14 | Browse threads in the browser: title, people, the three fields, emails, attachment links |
 | 15 | Fetch emails: the ones selected in Outlook, the last N days, or Gmail; then embed them |
+| 16 | Quick run: the emails selected in Outlook → searchable → summarised → shown in the browser |
 | 0 | Exit |
 
 Options 6 and 8 first list the threads; type a thread's number from that list (or the start of its ID).
@@ -307,6 +312,7 @@ Rebuild only after changing code, settings, guides or models; each rebuild write
 | `generation.max_tokens` | maximum output per call: 1500 |
 | `generation.include_quoted_history` | `"first_email"`: keep quoted earlier messages for forwards and a thread's first email |
 | `generation.est_read_tok_s` / `est_write_tok_s` | speeds used by the time estimate; update after a health check |
+| `quick_run_on_start` | `true`: on Windows, offer to process the emails selected in Outlook when the menu starts |
 | `embedding.dimension` | 1024 for bge-m3; changing model means rebuilding the database |
 
 ## 2.7 Test results so far

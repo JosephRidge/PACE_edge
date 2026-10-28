@@ -202,6 +202,7 @@ listen on this computer and work without network access.
 | 13 | Quality evaluation |
 | 14 | Browse threads in the browser (viewer) |
 | 15 | Fetch emails from Outlook or Gmail, then embed |
+| 16 | Quick run: selected Outlook emails → summaries → browser (also offered at start-up) |
 
 Every script can also be run directly, for example `& $py scripts\generate.py --list`.
 

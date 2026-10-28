@@ -1,8 +1,9 @@
 {
-  "data_dir": "~/Documents/@software-engineering/@datascience/@NMR/PACE_edge/proparco-data",
+  "data_dir": "~/proparco-data",
   "threads": 4,
   "api_key": "auto",
   "auto_approve": false,
+  "quick_run_on_start": true,
   "internal_domains": [
     "proparco.fr",
     "afd.fr"
@@ -17,8 +18,8 @@
     "batch_chars": 16000,
     "max_tokens": 1500,
     "include_quoted_history": "first_email",
-    "est_read_tok_s": 33,
-    "est_write_tok_s": 5.5
+    "est_read_tok_s": 18,
+    "est_write_tok_s": 3
   },
   "embedding": {
     "binary": "bin/llamafile-0.10.6-thin",
