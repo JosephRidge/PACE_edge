@@ -18,11 +18,13 @@
     "ctx_size": 8192,
     "startup_timeout": 360,
     "extra_args": [],
-    "batch_chars": 16000,
+    "batch_chars": 6000,
     "max_tokens": 1500,
     "include_quoted_history": "first_email",
     "est_read_tok_s": 18,
-    "est_write_tok_s": 3
+    "est_write_tok_s": 3,
+    "max_prompt_tokens": 2200,
+    "skip_bulk_emails": true
   },
   "embedding": {
     "binary": "bin/llamafile-0.10.6-thin",

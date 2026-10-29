@@ -39,7 +39,7 @@ import verify as V  # noqa: E402
 from engine import Engines, load_config  # noqa: E402
 
 PROMPT_VERSION = "v3.1-glossary"  # recorded with every result, so eval runs can be compared
-DEFAULT_BATCH_CHARS = 16000   # email text per model call; nothing is ever cut
+DEFAULT_BATCH_CHARS = 6000    # starting size per call; prompts are then measured in tokens and split
 DEFAULT_MAX_TOKENS = 1500     # per call; grows with the number of emails in a batch
 SUMMARY_EMBED_CHARS = 3500    # text used for the search vector of a thread summary
 
@@ -138,6 +138,23 @@ def is_forward(subject, raw):
     if m and FORWARD_TAG.search(m.group(0)):
         return True
     return bool(raw and FORWARD_MARK.search(raw))
+
+
+BULK_SENDER = re.compile(
+    r"^(no-?reply|do-?not-?reply|noreply|notifications?|notify|newsletters?|news|marketing|"
+    r"mailer|mailer-daemon|digest|alerts?|updates?|bounce)[\w.+-]*@", re.I)
+BULK_TEXT = re.compile(
+    r"(unsubscribe|opt[ -]out|manage (your )?(email )?preferences|view (this email )?in (your )?browser|"
+    r"se d[ée]sabonner|d[ée]sinscri|abmelden|abbestellen|darse de baja|cancelar (la )?suscripci|"
+    r"annulla(re)? l.iscrizione|disiscriv)", re.I)
+
+
+def is_bulk(m, raw_body):
+    """Newsletters, notifications and other automated mail: recognisable without the AI."""
+    email = (m["sender_email"] or "").lower()
+    if BULK_SENDER.match(email):
+        return True
+    return bool(BULK_TEXT.search(raw_body or m["body_clean"] or ""))
 
 
 def clean_quoted(lines):
@@ -597,7 +614,10 @@ def main():
     gcfg = cfg["generation"]
     internal_domains = [d.lower() for d in cfg.get("internal_domains", [])]
     budget = gcfg.get("batch_chars", DEFAULT_BATCH_CHARS)
-    token_limit = gcfg.get("ctx_size", 8192) - gcfg.get("max_tokens", DEFAULT_MAX_TOKENS) - 256
+    # Long prompts slow writing sharply on a CPU (0.8 vs 4 tokens/s); keep each call small.
+    token_limit = min(gcfg.get("ctx_size", 8192) - gcfg.get("max_tokens", DEFAULT_MAX_TOKENS) - 256,
+                      gcfg.get("max_prompt_tokens", 2200))
+    skip_bulk = gcfg.get("skip_bulk_emails", True)
     max_tokens = gcfg.get("max_tokens", DEFAULT_MAX_TOKENS)
     quoted_policy = gcfg.get("include_quoted_history", "first_email")  # or "forwards_only"
     model_name = Path(gcfg["binary"]).name
@@ -621,7 +641,8 @@ def main():
 
     # ---- prepare every pending email of every selected thread
     work = []
-    plan = {"threads": 0, "emails": 0, "chars": 0, "calls": 0, "quoted": 0, "forwards": 0}
+    plan = {"threads": 0, "emails": 0, "chars": 0, "calls": 0, "quoted": 0, "forwards": 0,
+            "bulk": 0}
     for t in threads:
         conv_id = t["conversation_id"]
         msgs = thread_messages(db, conv_id)
@@ -631,7 +652,7 @@ def main():
         if not pending:
             continue
         raw = load_raw_bodies(cfg, msgs)
-        forwards, quoted_flags, items, texts = {}, {}, [], {}
+        forwards, quoted_flags, items, texts, bulk = {}, {}, [], {}, {}
         for i in pending:
             m = msgs[i]
             body = raw.get(m["entry_id"]) or raw.get(m["fingerprint"])
@@ -639,20 +660,24 @@ def main():
             include = fwd or (quoted_policy == "first_email" and i == 0)
             text, used_quoted = email_content(m, body, include)
             forwards[i], quoted_flags[i], texts[i] = fwd, used_quoted, text
+            bulk[i] = skip_bulk and is_bulk(m, body)
             items.append((i, text))
             plan["chars"] += len(text)
             plan["quoted"] += used_quoted
             plan["forwards"] += fwd
-        batches = make_blocks(items, budget)
+        all_bulk = all(bulk[i] for i in pending)
+        batches = [] if all_bulk else make_blocks(items, budget)
+        plan["bulk"] += sum(1 for i in pending if bulk[i]) if all_bulk else 0
         plan["threads"] += 1
         plan["emails"] += len(pending)
         plan["calls"] += len(batches)
-        work.append((t, msgs, forwards, quoted_flags, texts, batches))
+        work.append((t, msgs, forwards, quoted_flags, texts, batches, all_bulk, pending))
 
     tok_in, tok_out, hours = estimate(cfg, plan)
     print(f"Threads with new emails: {plan['threads']}  |  emails: {plan['emails']}  |  "
           f"model calls: {plan['calls']}")
-    print(f"Forwards: {plan['forwards']}  |  emails including quoted history: {plan['quoted']}")
+    print(f"Forwards: {plan['forwards']}  |  emails including quoted history: {plan['quoted']}"
+          f"  |  bulk/automated (no AI needed): {plan['bulk']}")
     print(f"Text to read: {plan['chars']:,} chars (~{tok_in:,} tokens)  |  "
           f"to write: ~{tok_out:,} tokens")
     print(f"Estimated time at current speeds: ~{hours:.1f} hours")
@@ -667,13 +692,52 @@ def main():
     touched, n_ok, n_failed, n_review = set(), 0, 0, 0
 
     with Engines(cfg, only=["generation"], obs=ob) as eng:
-        for ti, (t, msgs, forwards, quoted_flags, texts, batches) in enumerate(work, 1):
+        for ti, (t, msgs, forwards, quoted_flags, texts, batches, all_bulk, pending) in \
+                enumerate(work, 1):
             conv_id = t["conversation_id"]
             state = load_state(db, conv_id)
-            print(f"\n[{ti}/{len(work)}] {t['subject'] or '(no subject)'}  "
-                  f"({len({b['email'] for bt in batches for b in bt})} new emails, "
-                  f"{len(batches)} call(s))", flush=True)
+            if not all_bulk:
+                print(f"\n[{ti}/{len(work)}] {t['subject'] or '(no subject)'}  "
+                      f"({len({b['email'] for bt in batches for b in bt})} new emails, "
+                      f"{len(batches)} call(s))", flush=True)
             thread_ok, carry = True, {}
+            if all_bulk:
+                print(f"\n[{ti}/{len(work)}] {t['subject'] or '(no subject)'}  "
+                      f"(automated or bulk email: recorded without the AI)", flush=True)
+                now = datetime.now(timezone.utc).isoformat()
+                for e_idx in pending:
+                    m = msgs[e_idx]
+                    who = identify(m["sender"], internal_domains)[1]
+                    item = {"history_entry": f"Automated or bulk email from {who}: "
+                                             f"{(m['subject'] or '(no subject)').strip()}.",
+                            "original_date": "", "date_uncertain": False, "deal_update": False,
+                            "deal_summary": "", "summary_sources": [], "new_steps": [],
+                            "completed_steps": [], "_raw_history": ""}
+                    fields = apply_email(state, m, item, forwards[e_idx], {}, internal_domains,
+                                         ob, conv_id)
+                    db.execute("""INSERT OR REPLACE INTO email_results
+                        (entry_id, conversation_id, seq, resolved_date, date_approx,
+                         is_forward, quoted_included, history_entry, deal_update,
+                         project_history, latest_deal_summary, next_steps, generated_at,
+                         model, run_id, review_status, verification, prompt_version)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (m["entry_id"], conv_id, e_idx + 1, fields["resolved_date"],
+                         int(fields["date_approx"]), int(forwards[e_idx]),
+                         int(quoted_flags[e_idx]), fields["history_entry"], 0,
+                         fields["project_history"], fields["latest_deal_summary"],
+                         fields["next_steps"], now, "rule:bulk", ob.run_id, review_default,
+                         "[]", PROMPT_VERSION))
+                db.execute("INSERT OR REPLACE INTO thread_state VALUES (?,?,?,?,?)",
+                           (conv_id, json.dumps(state, ensure_ascii=False),
+                            db.execute("SELECT COUNT(*) FROM email_results WHERE "
+                                       "conversation_id = ?", (conv_id,)).fetchone()[0],
+                            int(state["deal_related"]), now))
+                db.commit()
+                touched.add(conv_id)
+                n_ok += 1
+                ob.event("thread_done", thread=obs.short_id(conv_id), ok=True, calls=0,
+                         bulk=True, history_items=len(state["history"]))
+                continue
             queue, bi = list(batches), 0
             while queue:
                 batch = queue.pop(0)
@@ -740,6 +804,9 @@ def main():
 
                 state["deal_related"] |= bool(out.get("deal_related"))
                 merged = merge_parts(batch, items, carry)
+                if not state["deal_related"]:          # Notion rule: updates are about deals
+                    for v in merged.values():
+                        v["deal_update"] = False
                 block_ids = {}
                 now = datetime.now(timezone.utc).isoformat()
                 for e_idx in sorted(merged):
