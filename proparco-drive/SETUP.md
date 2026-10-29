@@ -37,7 +37,21 @@ This folder holds your emails, results and logs. It is on your computer's own di
 the flash disk, and it starts empty: the assistant only ever works with emails you fetch
 yourself (option 15).
 
-## Every time
+## Every time: plug in and double-click
+
+1. Plug in the flash disk, open `proparco-drive` and double-click **`start.bat`**
+   (Linux: `sh start.sh`). Keep classic Outlook open.
+2. That is all. Without any questions it fetches **new emails** from Outlook (the first time:
+   the last 30 days; afterwards: everything since the last run), makes them searchable,
+   writes the three fields for the new emails and opens the results in your browser.
+3. The first run can take a while (about 1 to 2 minutes per email); you can keep working.
+   If you close the window, the next start continues where it stopped.
+4. When it says *Done*, close the window and eject the flash disk.
+
+## The full menu (testers and advanced use)
+
+Double-click **`advanced-menu.bat`** (Linux: `sh advanced-menu.sh`) for every function
+separately:
 
 1. Plug in the flash disk and open the `proparco-drive` folder on it.
 2. Start the assistant:
@@ -313,6 +327,9 @@ Rebuild only after changing code, settings, guides or models; each rebuild write
 | `generation.include_quoted_history` | `"first_email"`: keep quoted earlier messages for forwards and a thread's first email |
 | `generation.est_read_tok_s` / `est_write_tok_s` | speeds used by the time estimate; update after a health check |
 | `quick_run_on_start` | `true`: on Windows, offer to process the emails selected in Outlook when the menu starts |
+| `start_mode` | `"auto"`: `start.bat` runs the plug-and-play flow (set by the build for every package); `"menu"`: full menu (recommended in a developer folder) |
+| `auto_source` | `"outlook"`: the automatic flow fetches from Outlook; `"none"`: only process emails already fetched |
+| `auto_first_fetch_days` | how far back the very first automatic fetch goes (default 30) |
 | `embedding.dimension` | 1024 for bge-m3; changing model means rebuilding the database |
 
 ## 2.7 Test results so far

@@ -282,16 +282,22 @@ if (current) show(current);
 </script></body></html>"""
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Build an offline page to browse the email threads.")
-    ap.add_argument("--no-open", action="store_true", help="build the page without opening it")
-    args = ap.parse_args()
-    cfg = load_config()
+def build(cfg):
+    """Write <data_dir>/viewer.html; returns (path, threads)."""
     threads = collect(cfg)
     data = json.dumps(threads, ensure_ascii=False).replace("</", "<\\/")
     page = PAGE.replace("__DATA__", data).replace("__BUILT__", datetime.now().strftime("%d/%m/%Y %H:%M"))
     out = cfg["_data_dir"] / "viewer.html"
     out.write_text(page, encoding="utf-8")
+    return out, threads
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Build an offline page to browse the email threads.")
+    ap.add_argument("--no-open", action="store_true", help="build the page without opening it")
+    args = ap.parse_args()
+    cfg = load_config()
+    out, threads = build(cfg)
     generated = sum(1 for t in threads if t["generated"])
     print(f"Viewer written: {out}")
     print(f"{len(threads)} threads, {generated} with generated fields, "

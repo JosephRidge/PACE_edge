@@ -370,7 +370,7 @@ def make_blocks(items, budget):
             parts.append(rest[:cut])
             rest = rest[cut:].lstrip()
         for p, part in enumerate(parts, 1):
-            blocks.append({"email": idx, "part": p, "parts": len(parts), "text": part})
+            blocks.append({"email": idx, "first": p == 1, "last": p == len(parts), "text": part})
     batches, cur, used = [], [], 0
     for b in blocks:
         if cur and used + len(b["text"]) > budget:
@@ -381,6 +381,22 @@ def make_blocks(items, budget):
     if cur:
         batches.append(cur)
     return batches
+
+
+def split_for_size(batch):
+    """A batch too large for the model: halve it, or cut a single email in two.
+    Nothing is dropped; order is kept."""
+    if len(batch) > 1:
+        mid = len(batch) // 2
+        return [batch[:mid], batch[mid:]]
+    b = batch[0]
+    text = b["text"]
+    cut = text.rfind(" ", 0, len(text) // 2)
+    if cut <= 0:
+        cut = len(text) // 2
+    first = {**b, "text": text[:cut], "last": False}
+    second = {**b, "text": text[cut:].lstrip(), "first": False}
+    return [[first], [second]]
 
 
 def build_prompt(subject, state, batch, msgs, forwards, internal_domains):
@@ -400,8 +416,10 @@ def build_prompt(subject, state, batch, msgs, forwards, internal_domains):
         head = (f"=== Block {n} | {'FORWARDED email' if forwards[b['email']] else 'Email'} | "
                 f"own date {ddmmyyyy(m['received_iso']) or 'unknown'} | "
                 f"From: {identify(m['sender'], internal_domains)[1]}")
-        if b["parts"] > 1:
-            head += f" | part {b['part']} of {b['parts']} of one long email"
+        if not (b["first"] and b["last"]):
+            head += (" | first part of one long email" if b["first"] else
+                     " | last part of one long email" if b["last"] else
+                     " | middle part of one long email")
         lines += [head, b["text"], ""]
     return "\n".join(lines)
 
@@ -437,7 +455,7 @@ def merge_parts(batch, items, carry):
                              "party": V.strip_markdown(s.get("party", ""))})
                            for k, s in enumerate(it.get("new_steps", []), 1)]
         m["completed_steps"] += it.get("completed_steps", [])
-        m["_last_part_seen"] = b["part"] == b["parts"]
+        m["_last_part_seen"] = b["last"]
     complete = {e: v for e, v in merged.items() if v.get("_last_part_seen")}
     for e in complete:
         del carry[e]
@@ -579,6 +597,7 @@ def main():
     gcfg = cfg["generation"]
     internal_domains = [d.lower() for d in cfg.get("internal_domains", [])]
     budget = gcfg.get("batch_chars", DEFAULT_BATCH_CHARS)
+    token_limit = gcfg.get("ctx_size", 8192) - gcfg.get("max_tokens", DEFAULT_MAX_TOKENS) - 256
     max_tokens = gcfg.get("max_tokens", DEFAULT_MAX_TOKENS)
     quoted_policy = gcfg.get("include_quoted_history", "first_email")  # or "forwards_only"
     model_name = Path(gcfg["binary"]).name
@@ -655,20 +674,46 @@ def main():
                   f"({len({b['email'] for bt in batches for b in bt})} new emails, "
                   f"{len(batches)} call(s))", flush=True)
             thread_ok, carry = True, {}
-            for bi, batch in enumerate(batches, 1):
+            queue, bi = list(batches), 0
+            while queue:
+                batch = queue.pop(0)
                 prompt = build_prompt(t["subject"], state, batch, msgs, forwards,
                                       internal_domains)
+                # Measure the real size in tokens; split until it fits with room to answer.
+                n_tokens = eng.count_tokens(SYSTEM_PROMPT + "\n" + prompt)
+                if n_tokens > token_limit:
+                    if len(batch) == 1 and len(batch[0]["text"]) < 400:
+                        ob.warn("email too large for the model even after splitting",
+                                thread=obs.short_id(conv_id), tokens=n_tokens)
+                        thread_ok = False
+                        break
+                    queue[:0] = split_for_size(batch)
+                    ob.event("batch_split", thread=obs.short_id(conv_id), tokens=n_tokens,
+                             limit=token_limit)
+                    continue
+                bi += 1
                 state_text = (render_summary(state["summary"]) + "\n" +
                               "\n".join(state["history"]) + "\n" +
                               "\n".join(f"{x['action']} {x['party']}" for x in state["steps"]))
                 started = time.time()
-                with ob.stage("generate_call", thread=obs.short_id(conv_id), call=bi):
-                    text, timings = eng.chat(
-                        [{"role": "system", "content": SYSTEM_PROMPT},
-                         {"role": "user", "content": prompt}],
-                        max_tokens=max_tokens, temperature=0.1, return_timings=True,
-                        response_format={"type": "json_object",
-                                         "schema": batch_schema(len(batch))})
+                try:
+                    with ob.stage("generate_call", thread=obs.short_id(conv_id), call=bi):
+                        text, timings = eng.chat(
+                            [{"role": "system", "content": SYSTEM_PROMPT},
+                             {"role": "user", "content": prompt}],
+                            max_tokens=max_tokens, temperature=0.1, return_timings=True,
+                            response_format={"type": "json_object",
+                                             "schema": batch_schema(len(batch))})
+                except RuntimeError as err:
+                    if "exceed" in str(err) and "context" in str(err) and \
+                            not (len(batch) == 1 and len(batch[0]["text"]) < 400):
+                        queue[:0] = split_for_size(batch)      # estimate was off: split, retry
+                        bi -= 1
+                        continue
+                    print(f"    ERROR on this thread: {str(err)[:200]}")
+                    print("    The thread is paused here; the run continues with the next one.")
+                    thread_ok = False
+                    break
                 secs = time.time() - started
                 try:
                     out = json.loads(text)
@@ -680,7 +725,7 @@ def main():
                               ok=out is not None, thread=obs.short_id(conv_id), call=bi,
                               blocks=len(batch), prompt_chars=len(prompt),
                               hit_token_limit=timings.get("predicted_n", 0) >= max_tokens)
-                print(f"    call {bi}/{len(batches)}: {secs:.0f}s | read "
+                print(f"    call {bi}: {secs:.0f}s | read "
                       f"{timings.get('prompt_n', 0)} tok @ "
                       f"{timings.get('prompt_per_second', 0):.1f}/s | wrote "
                       f"{timings.get('predicted_n', 0)} tok @ "
@@ -803,4 +848,3 @@ if __name__ == "__main__":
     except Exception as err:
         obs.finish_active("crashed", err)
         raise
-    

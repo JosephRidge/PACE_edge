@@ -4,6 +4,9 @@
   "api_key": "auto",
   "auto_approve": false,
   "quick_run_on_start": true,
+  "start_mode": "menu",
+  "auto_source": "outlook",
+  "auto_first_fetch_days": 30,
   "internal_domains": [
     "proparco.fr",
     "afd.fr"

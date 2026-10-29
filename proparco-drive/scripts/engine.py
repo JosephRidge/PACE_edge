@@ -50,7 +50,8 @@ def load_config(path=None):
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
 
-    data_dir = Path(os.path.expanduser(cfg["data_dir"]))
+    # PROPARCO_DATA_DIR overrides the setting for one run (e.g. a clean test folder).
+    data_dir = Path(os.path.expanduser(os.environ.get("PROPARCO_DATA_DIR") or cfg["data_dir"]))
     if not data_dir.is_absolute():
         data_dir = DRIVE_ROOT / data_dir
     cfg["_data_dir"] = data_dir
@@ -273,6 +274,13 @@ class Engines:
         if vectors and len(vectors[0]) != want:
             raise RuntimeError(f"Embedding size is {len(vectors[0])}, config expects {want}.")
         return (vectors, resp.get("usage", {})) if return_usage else vectors
+
+    def count_tokens(self, text):
+        """Exact token count from the writer model; a cautious estimate if unavailable."""
+        try:
+            return len(self.gen.post("/tokenize", {"content": text}, timeout=60)["tokens"])
+        except Exception:
+            return len(text) // 2
 
     def chat(self, messages, max_tokens=300, temperature=0.2, return_timings=False, **extra):
         """extra: any other server option, e.g. response_format for JSON output."""

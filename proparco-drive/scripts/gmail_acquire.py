@@ -39,7 +39,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import obs  # noqa: E402
 from engine import load_config  # noqa: E402
 
-SKIP_LABELS = {"spam", "trash", "\\spam", "\\trash"}
+SKIP_LABELS = {"spam", "trash"}
+
+
+def clean_label(label):
+    """Gmail labels arrive as \\Inbox, "\\\\Spam" (IMAP-escaped) or plain names; normalise them."""
+    label = label.strip().strip('"').replace("\\\\", "\\")
+    return label.lstrip("\\")
+
+
+def skip(labels):
+    return any(clean_label(l).lower() in SKIP_LABELS for l in labels)
 
 
 # ================================================================ message parsing
@@ -159,7 +169,8 @@ def to_record(raw_bytes, thread_id, msg_id, labels, att_dir, counter, max_bytes)
 # ================================================================ sources
 
 def from_imap(args, since, att_dir, counter, max_bytes, ob):
-    password = getpass.getpass(f"App password for {args.user} (not stored): ")
+    # Google shows app passwords in groups of four ("abcd efgh ijkl mnop"); spaces are not part of it.
+    password = getpass.getpass(f"App password for {args.user} (not stored): ").replace(" ", "")
     imap = imaplib.IMAP4_SSL("imap.gmail.com")
     imap.login(args.user, password)
     try:
@@ -188,10 +199,10 @@ def from_imap(args, since, att_dir, counter, max_bytes, ob):
             thrid = re.search(rb"X-GM-THRID (\d+)", head)
             msgid = re.search(rb"X-GM-MSGID (\d+)", head)
             labels_m = re.search(rb"X-GM-LABELS \((.*?)\)", head)
-            labels = [l.strip('"') for l in
+            labels = [clean_label(l) for l in
                       re.findall(r'"[^"]*"|\S+', labels_m.group(1).decode(errors="replace"))
                       ] if labels_m else []
-            if any(l.lower() in SKIP_LABELS for l in labels):
+            if skip(labels):
                 continue
             yield to_record(raw, thrid.group(1).decode() if thrid else None,
                             msgid.group(1).decode() if msgid else None,
@@ -211,8 +222,8 @@ def from_mbox(args, since, att_dir, counter, max_bytes, ob):
     ob.event("plan", source="mbox", file=Path(args.file).name)
     taken = 0
     for i, msg in enumerate(box, 1):
-        labels = [l.strip() for l in str(msg.get("X-Gmail-Labels") or "").split(",") if l.strip()]
-        if any(l.lower() in SKIP_LABELS for l in labels):
+        labels = [clean_label(l) for l in str(msg.get("X-Gmail-Labels") or "").split(",") if l.strip()]
+        if skip(labels):
             continue
         dt = None
         try:

@@ -44,7 +44,8 @@ MINISTRAL_LLAMAFILE = "Ministral-3-3B-Instruct-2512-Q4_K_M.llamafile"
 MINISTRAL_GGUF = "Ministral-3-3B-Instruct-2512-Q4_K_M.gguf"
 EMBED_GGUF = "bge-m3-q8.gguf"
 SCRIPTS = ["engine.py", "embed.py", "generate.py", "verify.py", "obs.py", "search.py",
-           "eval.py", "menu.py", "viewer.py", "gmail_acquire.py", "outlook_acquire.ps1"]
+           "eval.py", "menu.py", "viewer.py", "gmail_acquire.py", "outlook_acquire.ps1",
+           "autorun.py"]
 
 
 def step(msg):
@@ -106,6 +107,9 @@ def pip_target(target, platform_tag, python_version=None):
 def write_settings(src_settings, dst_settings):
     cfg = json.loads(src_settings.read_text(encoding="utf-8"))
     cfg["data_dir"] = "~/proparco-data"        # on the target machine's own disk
+    cfg["start_mode"] = "auto"                 # clients: start.bat runs the automatic flow
+    cfg.setdefault("auto_source", "outlook")
+    cfg.setdefault("auto_first_fetch_days", 30)
     cfg["generation"]["binary"] = f"bin/{ENGINE}"
     cfg["generation"]["model"] = f"models/{MINISTRAL_GGUF}"
     cfg["embedding"]["binary"] = f"bin/{ENGINE}"
@@ -172,6 +176,17 @@ def main():
                  "separately.")
     if drive.exists():
         sys.exit(f"{drive} already exists. Remove it or choose another --out.")
+    # The destination must exist and be writable (a stick that is not mounted is a common cause).
+    try:
+        out_root.mkdir(parents=True, exist_ok=True)
+        probe = out_root / ".write-test"
+        probe.write_text("ok")
+        probe.unlink()
+    except OSError:
+        sys.exit(f"Cannot write to {out_root}.\n"
+                 "If this is a flash disk, it is probably not mounted (or mounted read-only).\n"
+                 "Check with: lsblk -f   then mount it, e.g.: udisksctl mount -b /dev/sdb1\n"
+                 "On Windows, check the drive letter in File Explorer.")
 
     step("Checking source files")
     # On Windows the engine is saved as .exe; accept either name.
@@ -199,7 +214,7 @@ def main():
     step("Scripts, launchers and config")
     for s in SCRIPTS:
         copy(SRC / "scripts" / s, drive / "scripts" / s)
-    for f in ("start.sh", "start.bat", "README.md", "SETUP.md"):
+    for f in ("start.sh", "start.bat", "advanced-menu.bat", "advanced-menu.sh", "README.md", "SETUP.md"):
         if (SRC / f).exists():
             copy(SRC / f, drive / f)
     (drive / "start.sh").chmod(0o755)
