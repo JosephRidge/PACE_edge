@@ -1,4 +1,4 @@
 @echo off
-rem Demo run: only the 2 newest emails (fetch, summarise, show). Change the number below if needed.
-set PROPARCO_DEMO_EMAILS=2
+rem Demo run: the newest email only, one thread (fetch, summarise, show).
+set PROPARCO_DEMO_EMAILS=1
 call "%~dp0start.bat"

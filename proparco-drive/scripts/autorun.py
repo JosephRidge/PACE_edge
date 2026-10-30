@@ -15,7 +15,8 @@ Settings (config/settings.json):
   "start_mode": "auto"            "auto" = this flow; "menu" = the full menu
   "auto_source": "outlook"        "outlook" or "none" (skip fetching, only process)
   "auto_first_fetch_days": 30     how far back the very first fetch goes
-  "demo_max_emails": 0            demo: only the N newest emails (0 = off); demo.bat sets 2
+  "demo_max_emails": 0            demo: only the N newest emails (0 = off); demo.bat sets 1.
+                                  A demo always summarises ONE thread, for speed.
 Testers open the full menu with advanced-menu.bat (or: sh start.sh menu.py --menu).
 """
 import json
@@ -120,7 +121,7 @@ def main():
     data = cfg["_data_dir"]
     demo = demo_limit(cfg)
     say("=" * 64)
-    say(" Proparco email assistant" + (f"  (DEMO: {demo} newest email(s) only)" if demo else ""))
+    say(" Proparco email assistant" + ("  (DEMO: newest email, one thread)" if demo else ""))
     say("=" * 64)
 
     if not data.exists():
@@ -169,11 +170,11 @@ def main():
     if demo:
         latest = latest_outlook_run(data)
         fetched = latest if latest is not None and latest != before else None
-        threads = demo_threads(data, demo, fetched)
+        threads = demo_threads(data, demo, fetched)[:1]   # a demo covers one thread only
         if not threads:
             say("   Demo: no emails without a summary were found.")
         for i, conv in enumerate(threads, 1):
-            say(f"--- Demo thread {i} of {len(threads)}")
+            say("--- Demo: summarising one thread")
             run("generate.py", "--thread", conv)
     else:
         run("generate.py", "--all")
