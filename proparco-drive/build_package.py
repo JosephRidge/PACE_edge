@@ -104,12 +104,18 @@ def pip_target(target, platform_tag, python_version=None):
     subprocess.run(cmd, check=True)
 
 
-def write_settings(src_settings, dst_settings):
+def write_settings(src_settings, dst_settings, data_on_drive=True):
     cfg = json.loads(src_settings.read_text(encoding="utf-8"))
-    cfg["data_dir"] = "~/proparco-data"        # on the target machine's own disk
+    if data_on_drive:
+        cfg["data_dir"] = "../proparco-data"   # on the flash disk, next to proparco-drive
+        cfg["data_on_drive"] = True
+    else:
+        cfg["data_dir"] = "~/proparco-data"    # on the target machine's own disk
+        cfg["data_on_drive"] = False
     cfg["start_mode"] = "auto"                 # clients: start.bat runs the automatic flow
     cfg.setdefault("auto_source", "outlook")
     cfg.setdefault("auto_first_fetch_days", 30)
+    cfg.setdefault("demo_max_emails", 0)
     cfg["generation"]["binary"] = f"bin/{ENGINE}"
     cfg["generation"]["model"] = f"models/{MINISTRAL_GGUF}"
     cfg["embedding"]["binary"] = f"bin/{ENGINE}"
@@ -117,7 +123,7 @@ def write_settings(src_settings, dst_settings):
     dst_settings.parent.mkdir(parents=True, exist_ok=True)
     dst_settings.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n",
                             encoding="utf-8")
-    print("   settings.json written (data_dir = ~/proparco-data, both models via the engine)")
+    print(f"   settings.json written (data: {'on the flash disk, ../proparco-data' if data_on_drive else 'on the laptop, ~/proparco-data'})")
 
 
 def write_version(drive):
@@ -164,6 +170,8 @@ def main():
                     help="also copy the current data folder next to the drive folder")
     ap.add_argument("--python-zip", help="use an already downloaded Windows embeddable zip")
     ap.add_argument("--skip-windows", action="store_true", help="Linux-only package")
+    ap.add_argument("--data-on-laptop", action="store_true",
+                    help="keep client data on the laptop (~/proparco-data) instead of the flash disk")
     args = ap.parse_args()
 
     out_root = Path(args.out).expanduser().resolve()
@@ -214,13 +222,15 @@ def main():
     step("Scripts, launchers and config")
     for s in SCRIPTS:
         copy(SRC / "scripts" / s, drive / "scripts" / s)
-    for f in ("start.sh", "start.bat", "advanced-menu.bat", "advanced-menu.sh", "README.md", "SETUP.md"):
+    for f in ("start.sh", "start.bat", "advanced-menu.bat", "advanced-menu.sh", "demo.bat", "demo.sh",
+              "README.md", "SETUP.md"):
         if (SRC / f).exists():
             copy(SRC / f, drive / f)
     (drive / "start.sh").chmod(0o755)
     if (SRC / "config" / "eval_set.json").exists():
         copy(SRC / "config" / "eval_set.json", drive / "config" / "eval_set.json")
-    write_settings(SRC / "config" / "settings.json", drive / "config" / "settings.json")
+    write_settings(SRC / "config" / "settings.json", drive / "config" / "settings.json",
+                   data_on_drive=not args.data_on_laptop)
 
     step("Model engine (one file, two names)")
     copy(engine_src, drive / "bin" / ENGINE)
@@ -260,6 +270,9 @@ def main():
     size = sum(p.stat().st_size for p in drive.rglob("*") if p.is_file()) / 1e9
     print(f"\nDone: {drive}  ({size:.1f} GB)")
     print("Linux:   ./start.sh            Windows: start.bat")
+    if not args.data_on_laptop:
+        print("Data:    stored on the flash disk (proparco-data next to proparco-drive).")
+        print("         The emails travel with the stick: use an encrypted stick (BitLocker To Go).")
     if args.with_data:
         print("Data:    copy proparco-data to the home folder of the target machine "
               "(~/proparco-data or C:\\Users\\<name>\\proparco-data).")

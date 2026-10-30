@@ -56,12 +56,13 @@ def run_outlook(*args):
     shell = shutil.which("powershell") or shutil.which("pwsh")
     out = str(load_config()["_data_dir"] / "acquisitions")
     print()
-    # No execution-policy bypass: if Windows blocks scripts, that is a decision for IT.
-    result = subprocess.run([shell, "-NoProfile", "-File", str(HERE / "outlook_acquire.ps1"),
+    # "-ExecutionPolicy Bypass" applies to this one PowerShell process only and changes no setting.
+    # A policy enforced by IT through Group Policy still takes precedence.
+    result = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(HERE / "outlook_acquire.ps1"),
                              *args, "-OutRoot", out], cwd=str(HERE.parent))
     if result.returncode != 0:
-        print("\nThe Outlook export did not finish. If Windows says running scripts is "
-              "disabled, ask IT; do not change the execution policy on a work laptop.")
+        print("\nThe Outlook export did not finish (see the message above). Check that classic "
+              "Outlook is open. If scripts are still blocked, the policy is enforced by IT.")
         input("\nPress Enter to return to the menu ...")
         return False
     return True
@@ -230,6 +231,8 @@ def stick_guard(cfg):
     data = cfg["_data_dir"]
     # Running from a stick and data on that same stick: client emails would be carried around.
     # Running the package from the laptop's own disk (e.g. if USB is blocked) is fine.
+    if cfg.get("data_on_drive"):
+        return                                   # deliberate choice: data travels with the stick
     if _on_removable_media(DRIVE_ROOT) and _same_disk(data, DRIVE_ROOT):
         print("\n" + "!" * 60)
         print(" WARNING: the data folder is on the same disk as this program:")
@@ -308,6 +311,9 @@ def main():
     while True:
         print("\n" + "=" * 60)
         print(" Proparco email assistant (local)")
+        if not (DRIVE_ROOT / "SHA256SUMS.txt").exists():
+            print(" DEVELOPER FOLDER: menu mode. Clients run the built package")
+            print(" (start.bat / start.sh on the flash disk), which starts automatically.")
         print(f" Data folder: {cfg['_data_dir']}")
         print(f" Status: {status_line(cfg)}")
         print("=" * 60)

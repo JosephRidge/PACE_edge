@@ -15,11 +15,14 @@ Settings (config/settings.json):
   "start_mode": "auto"            "auto" = this flow; "menu" = the full menu
   "auto_source": "outlook"        "outlook" or "none" (skip fetching, only process)
   "auto_first_fetch_days": 30     how far back the very first fetch goes
+  "demo_max_emails": 0            demo: only the N newest emails (0 = off); demo.bat sets 2
 Testers open the full menu with advanced-menu.bat (or: sh start.sh menu.py --menu).
 """
 import json
 import math
+import os
 import platform
+import sqlite3
 import shutil
 import subprocess
 import sys
@@ -59,19 +62,55 @@ def days_to_fetch(data, first_days):
     return max(1, math.ceil(gap) + 1), False
 
 
-def fetch_outlook(data, days):
+def demo_limit(cfg):
+    try:
+        return max(0, int(os.environ.get("PROPARCO_DEMO_EMAILS") or cfg.get("demo_max_emails", 0) or 0))
+    except ValueError:
+        return 0
+
+
+def latest_outlook_run(data):
+    runs = sorted((data / "acquisitions").glob("OUTLOOK-*/acquisition.json"),
+                  key=lambda p: p.stat().st_mtime)
+    return runs[-1] if runs else None
+
+
+def demo_threads(data, limit, fetched):
+    """Threads to summarise in demo mode: those of the emails just fetched, or else the
+    threads of the newest emails that have no summary yet."""
+    if fetched is not None:
+        with open(fetched, encoding="utf-8-sig") as f:
+            msgs = json.load(f).get("messages") or []
+        msgs = msgs if isinstance(msgs, list) else [msgs]
+        return list(dict.fromkeys(m.get("conversationId") for m in msgs if m.get("conversationId")))
+    db_path = data / "db" / "proparco.db"
+    if not db_path.exists():
+        return []
+    db = sqlite3.connect(db_path)
+    has_results = db.execute("SELECT 1 FROM sqlite_master WHERE name='email_results'").fetchone()
+    query = ("SELECT conversation_id FROM messages m "
+             + ("WHERE NOT EXISTS (SELECT 1 FROM email_results r WHERE r.entry_id = m.entry_id) "
+                if has_results else "")
+             + "ORDER BY COALESCE(received_iso, received_raw) DESC LIMIT ?")
+    rows = [r[0] for r in db.execute(query, (limit,))]
+    db.close()
+    return list(dict.fromkeys(rows))
+
+
+def fetch_outlook(data, days, max_messages=None):
     shell = shutil.which("powershell") or shutil.which("pwsh")
     if not shell:
         say("   PowerShell was not found, so emails cannot be fetched from Outlook.")
         return False
-    result = subprocess.run([shell, "-NoProfile", "-File", str(HERE / "outlook_acquire.ps1"),
-                             "-DaysBack", str(days), "-OutRoot", str(data / "acquisitions")],
-                            cwd=str(HERE.parent))
+    args = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(HERE / "outlook_acquire.ps1"),
+            "-DaysBack", str(days), "-OutRoot", str(data / "acquisitions")]
+    if max_messages:
+        args += ["-MaxMessages", str(max_messages)]
+    result = subprocess.run(args, cwd=str(HERE.parent))
     if result.returncode != 0:
         say("\n   Fetching from Outlook did not work (see the message above).")
-        say("   Check that classic Outlook is open. If Windows says running scripts is")
-        say("   disabled, that is for IT to decide; processing continues with emails")
-        say("   already fetched.")
+        say("   Check that classic Outlook is open. If scripts are still blocked, the")
+        say("   policy is enforced by IT. Processing continues with emails already fetched.")
         return False
     return True
 
@@ -79,26 +118,35 @@ def fetch_outlook(data, days):
 def main():
     cfg = load_config()
     data = cfg["_data_dir"]
+    demo = demo_limit(cfg)
     say("=" * 64)
-    say(" Proparco email assistant")
+    say(" Proparco email assistant" + (f"  (DEMO: {demo} newest email(s) only)" if demo else ""))
     say("=" * 64)
 
     if not data.exists():
         for sub in ("acquisitions", "db", "logs"):
             (data / sub).mkdir(parents=True, exist_ok=True)
-        say(f"\nFirst use on this computer: created the data folder\n   {data}")
-        say("   (on this laptop's own disk; nothing is stored on the flash disk)")
+        say(f"\nFirst use: created the data folder\n   {data}")
+        if cfg.get("data_on_drive"):
+            say("   (on the flash disk, next to the program: the emails travel with the stick,")
+            say("    so keep the stick safe; an encrypted stick is recommended)")
+        else:
+            say("   (on this laptop's own disk; nothing is stored on the flash disk)")
 
     # 1. fetch
+    before = latest_outlook_run(data)
     source = cfg.get("auto_source", "outlook")
     if source == "outlook":
         days, first = days_to_fetch(data, cfg.get("auto_first_fetch_days", 30))
-        say(f"\nStep 1 of 4: fetching {'the last' if first else 'new emails from the last'} "
-            f"{days} day(s) from Outlook (Inbox and Sent) ...")
+        if demo:
+            say(f"\nStep 1 of 4: fetching the {demo} newest email(s) from Outlook ...")
+        else:
+            say(f"\nStep 1 of 4: fetching {'the last' if first else 'new emails from the last'} "
+                f"{days} day(s) from Outlook (Inbox and Sent) ...")
         if platform.system() != "Windows":
             say("   Outlook fetching needs Windows; skipped. Use advanced-menu for Gmail.")
         else:
-            fetch_outlook(data, days)
+            fetch_outlook(data, days, max_messages=demo or None)
     else:
         say("\nStep 1 of 4: fetching is switched off; processing emails already fetched.")
 
@@ -118,7 +166,17 @@ def main():
     say("\nStep 3 of 4: writing summaries for new emails.")
     say("   This takes about 1 to 2 minutes per new email; you can keep working.")
     say("   If you close this window, the next start continues where it stopped.\n")
-    run("generate.py", "--all")
+    if demo:
+        latest = latest_outlook_run(data)
+        fetched = latest if latest is not None and latest != before else None
+        threads = demo_threads(data, demo, fetched)
+        if not threads:
+            say("   Demo: no emails without a summary were found.")
+        for i, conv in enumerate(threads, 1):
+            say(f"--- Demo thread {i} of {len(threads)}")
+            run("generate.py", "--thread", conv)
+    else:
+        run("generate.py", "--all")
 
     # 4. results
     say("\nStep 4 of 4: opening the results in your browser ...")

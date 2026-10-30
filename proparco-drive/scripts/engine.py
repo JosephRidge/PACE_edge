@@ -53,7 +53,7 @@ def load_config(path=None):
     # PROPARCO_DATA_DIR overrides the setting for one run (e.g. a clean test folder).
     data_dir = Path(os.path.expanduser(os.environ.get("PROPARCO_DATA_DIR") or cfg["data_dir"]))
     if not data_dir.is_absolute():
-        data_dir = DRIVE_ROOT / data_dir
+        data_dir = (DRIVE_ROOT / data_dir).resolve()   # "../proparco-data" = next to the package
     cfg["_data_dir"] = data_dir
 
     # "auto" = a new random key for every run. It is never written to disk.
