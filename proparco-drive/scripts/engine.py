@@ -77,6 +77,23 @@ def _port_in_use(port):
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def _clean_vector(v):
+    """Embedding servers can return nested lists or nulls (e.g. for NaN values on some CPUs).
+    Return a flat list of plain floats, so storing it can never fail."""
+    if v and isinstance(v[0], list):          # per-token output: average into one vector
+        n = len(v)
+        v = [sum(col) / n for col in zip(*[[x if isinstance(x, (int, float)) else 0.0 for x in row]
+                                          for row in v])]
+    out = []
+    for x in v:
+        try:
+            f = float(x)
+            out.append(f if math.isfinite(f) else 0.0)
+        except (TypeError, ValueError):
+            out.append(0.0)
+    return out
+
+
 # ---------------------------------------------------------------- one server
 
 class Server:
@@ -269,7 +286,7 @@ class Engines:
         """Return one vector per text, in the same order (and token usage if asked)."""
         resp = self.emb.post("/v1/embeddings", {"input": list(texts)}, timeout=300)
         data = resp["data"]
-        vectors = [d["embedding"] for d in sorted(data, key=lambda d: d["index"])]
+        vectors = [_clean_vector(d["embedding"]) for d in sorted(data, key=lambda d: d["index"])]
         want = self.cfg["embedding"]["dimension"]
         if vectors and len(vectors[0]) != want:
             raise RuntimeError(f"Embedding size is {len(vectors[0])}, config expects {want}.")
