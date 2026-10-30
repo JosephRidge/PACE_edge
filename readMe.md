@@ -1,20 +1,25 @@
 # Proparco email assistant (local AI, runs from a flash disk)
 
-Reads Outlook emails and writes three CRM fields per email, entirely on the laptop:
+Reads Outlook emails and writes three CRM fields per email, entirely offline from a flash disk:
 **Latest Deal Summary**, **Project History** and **Next Steps**.
 The AI runs offline from a flash disk; email content never leaves the computer.
 
 > Field names will be aligned with the Notion database at the Notion step.
 
+> **This repository is the source code.** It does not include the AI models or the portable
+> Python, so `start.bat` does not run from a clone. To use the assistant, take the built package
+> (flash disk or zip from the project team); to make one, follow the builder steps below.
+
 ## Received a ready flash disk? (clients)
 
-1. Open `proparco-drive` on the flash disk and start it:
-   **Windows** double-click `start.bat`, **Linux** `sh start.sh`.
-   The first time, it creates an empty data folder on this computer (never on the flash disk).
-2. Choose **1** (health check) the first time. To process emails, select them in Outlook:
-   at start-up the assistant offers to fetch, summarise and show them (or choose **16** later).
-   Choose **14** to browse all results in your browser.
-3. Choose **0** to exit, and eject the flash disk before unplugging.
+1. Keep classic Outlook open. On the flash disk, open `proparco-drive` and double-click
+   **`start.bat`** (Linux: `sh start.sh`).
+2. No questions: it fetches new emails, summarises them and opens the results in your browser.
+   The emails and results are stored on the flash disk itself (`proparco-data`), so they travel
+   with the stick: keep it safe, and use an encrypted stick (BitLocker To Go).
+3. When it says *Done*, close the window and eject the flash disk.
+
+Testers: **`advanced-menu.bat`** opens the full menu (health check, search, logs, Gmail, ...).
 
 Full client guide: [SETUP.md, Part 1](SETUP.md#part-1-clients-plug-and-play).
 

@@ -37,7 +37,8 @@ Avoid `@` characters and spaces in the folders you use. The examples use your ho
 ## 2. Get the code
 
 You can clone onto the laptop's own disk or **directly onto a flash disk** and work from there.
-Either way, the data always stays on the laptop (section 6).
+Your development data stays on the laptop (section 6). The built package for clients keeps
+its data on the flash disk (section 11).
 
 **Option A: on the laptop**
 
@@ -300,8 +301,8 @@ Get-ChildItem E:\ -Recurse -File -Include *.db, acquisition.json, viewer.html, *
 Get-Content E:\proparco-drive\VERSION.txt
 ```
 
-Only the `proparco-drive` folder belongs on the disk; see `SETUP.md` section 2.5 for the full
-list of what must never be there.
+Before handing a disk over, only the `proparco-drive` folder belongs on it; the client's
+`proparco-data` folder is created next to it at first use. See `SETUP.md` section 2.5.
 
 Then test it the way a client will: double-click `E:\proparco-drive\start.bat`
 (see `SETUP.md`, Part 1). Eject the disk properly before unplugging it.
