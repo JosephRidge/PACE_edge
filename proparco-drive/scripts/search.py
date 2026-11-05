@@ -28,15 +28,28 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config()
-    path = cfg["_data_dir"] / "db" / "proparco.db"
-    if not path.exists():
-        sys.exit(f"No database at {path}. Run embed.py first.")
     import sqlite_vec
-    db = sqlite3.connect(path)
-    db.row_factory = sqlite3.Row
-    db.enable_load_extension(True)
-    sqlite_vec.load(db)
-    db.enable_load_extension(False)
+    # Emails: proparco.db on the drive. Documents: the published server copy if reachable,
+    # otherwise the local build (server.db on the drive).
+    sources = [("emails", cfg["_data_dir"] / "db" / "proparco.db")]
+    published = cfg.get("server_db_path")
+    local_docs = cfg["_data_dir"] / "db" / "server.db"
+    if published and Path(published).exists():
+        sources.append(("documents", Path(published)))
+    elif local_docs.exists():
+        sources.append(("documents", local_docs))
+    sources = [(k, p) for k, p in sources if p.exists()]
+    if not sources:
+        sys.exit("No database yet. Run embed.py (emails) or embed.py --documents (server files).")
+
+    def connect(path, read_only):
+        uri = f"file:{Path(path).as_posix()}?mode=ro" if read_only else str(path)
+        con = sqlite3.connect(uri, uri=read_only)
+        con.row_factory = sqlite3.Row
+        con.enable_load_extension(True)
+        sqlite_vec.load(con)
+        con.enable_load_extension(False)
+        return con
 
     with Engines(cfg, only=["embedding"]) as eng:
         t0 = time.time()
@@ -44,36 +57,43 @@ def main():
         q = sqlite_vec.serialize_float32(qvec)
     print(f"\nQuery embedded in {time.time() - t0:.1f}s\n")
 
-    if not args.summaries:
-        rows = db.execute("""
-            SELECT v.distance, c.text, m.subject, m.sender, m.received_iso, m.conversation_id
-            FROM vec_chunks v
-            JOIN chunks c   ON c.id = v.rowid
-            JOIN messages m ON m.entry_id = c.entry_id
-            WHERE v.embedding MATCH ? AND k = ?
-            ORDER BY v.distance""", (q, args.k)).fetchall()
-        print(f"=== Top {len(rows)} email chunks (similarity: 1.00 = identical meaning) ===")
-        for r in rows:
-            print(f"\n[{1 - r['distance']:.2f}] {(r['received_iso'] or '')[:10]} | "
-                  f"{r['subject']} | thread {r['conversation_id'][:12]}")
-            print("    " + r["text"][:300].replace("\n", " ") + ("..." if len(r["text"]) > 300 else ""))
-
-    has_summaries = db.execute(
-        "SELECT name FROM sqlite_master WHERE name = 'thread_summaries'").fetchone()
-    if has_summaries and db.execute("SELECT COUNT(*) FROM thread_summaries").fetchone()[0]:
-        rows = db.execute("""
-            SELECT v.distance, s.text, s.conversation_id
-            FROM vec_thread_summaries v
-            JOIN thread_summaries s ON s.id = v.rowid
-            WHERE v.embedding MATCH ? AND k = ?
-            ORDER BY v.distance""", (q, args.k)).fetchall()
-        print(f"\n=== Top {len(rows)} thread summaries ===")
-        for r in rows:
-            print(f"\n[{1 - r['distance']:.2f}] thread {r['conversation_id'][:12]}")
-            print("    " + r["text"][:400].replace("\n", " | "))
-    elif args.summaries:
-        print("No thread summaries yet. Run generate.py first.")
-
+    for kind, path in sources:
+        db = connect(path, read_only=(kind == "documents"))
+        if not args.summaries:
+            rows = db.execute("""
+                SELECT v.distance, c.text, m.subject, m.sender, m.received_iso, m.conversation_id
+                FROM vec_chunks v
+                JOIN chunks c   ON c.id = v.rowid
+                JOIN messages m ON m.entry_id = c.entry_id
+                WHERE v.embedding MATCH ? AND k = ?
+                ORDER BY v.distance""", (q, args.k)).fetchall()
+            label = "document" if kind == "documents" else "email"
+            print(f"\n=== Top {len(rows)} {label} chunks from {path.name} "
+                  f"(similarity: 1.00 = identical meaning) ===")
+            for r in rows:
+                where = (r["conversation_id"].replace("folder:", "folder ")[:40] if kind == "documents"
+                         else f"thread {r['conversation_id'][:12]}")
+                print(f"\n[{(1 - r['distance']) if r['distance'] is not None else 0:.2f}] {(r['received_iso'] or '')[:10]} | "
+                      f"{r['subject']} | {where}")
+                print("    " + r["text"][:300].replace("\n", " ").replace("\\", "/")
+                      + ("..." if len(r["text"]) > 300 else ""))
+        if kind == "emails":
+            has_summaries = db.execute(
+                "SELECT name FROM sqlite_master WHERE name = 'thread_summaries'").fetchone()
+            if has_summaries and db.execute("SELECT COUNT(*) FROM thread_summaries").fetchone()[0]:
+                rows = db.execute("""
+                    SELECT v.distance, s.text, s.conversation_id
+                    FROM vec_thread_summaries v
+                    JOIN thread_summaries s ON s.id = v.rowid
+                    WHERE v.embedding MATCH ? AND k = ?
+                    ORDER BY v.distance""", (q, args.k)).fetchall()
+                print(f"\n=== Top {len(rows)} thread summaries ===")
+                for r in rows:
+                    print(f"\n[{(1 - r['distance']) if r['distance'] is not None else 0:.2f}] thread {r['conversation_id'][:12]}")
+                    print("    " + r["text"][:400].replace("\n", " | "))
+            elif args.summaries:
+                print("No thread summaries yet. Run generate.py first.")
+        db.close()
 
 if __name__ == "__main__":
     try:

@@ -298,6 +298,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="report only; no AI, no database writes")
     ap.add_argument("--show", type=int, default=0, help="print N cleaned emails (with --dry-run)")
     ap.add_argument("--limit", type=int, default=0, help="only process the first N new emails")
+    ap.add_argument("--documents", action="store_true",
+                    help="server documents only, into server.db (default: emails only, into proparco.db)")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -307,7 +309,8 @@ def main():
     if not runs:
         sys.exit(f"No acquisition.json found under {source}")
 
-    db_path = cfg["_data_dir"] / "db" / "proparco.db"
+    # Emails (personal) and server documents (shared) live in separate databases.
+    db_path = cfg["_data_dir"] / "db" / ("server.db" if args.documents else "proparco.db")
     # A dry run still reads an existing database, so "already in database" is accurate.
     if args.dry_run and not db_path.exists():
         db, sqlite_vec = None, None
@@ -317,7 +320,8 @@ def main():
     # ---- collect and clean new messages
     stats = dict(total=0, stored=0, duplicate=0, empty=0, no_email=0, chars_in=0, chars_out=0)
     seen, todo = set(), []
-    all_msgs = [msg for run in runs for msg in load_messages(run)]
+    all_msgs = [msg for run in runs for msg in load_messages(run)
+                if (msg.get("kind") == "document") == bool(args.documents)]
     # documents read several times (changed files): only the newest version counts.
     # Runs are in date order, so the last occurrence of a document is the newest one.
     newest_doc = {m["entry_id"]: m["fingerprint"] for m in all_msgs if m.get("kind") == "document"}

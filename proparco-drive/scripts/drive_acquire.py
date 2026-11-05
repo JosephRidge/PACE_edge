@@ -452,6 +452,8 @@ def main():
                 skipped.append((str(rel), reason or "no text"))
                 if reason == "no permission to read":   # remembered; retried after retry_days
                     seen[str(p)] = f"denied|{stamp}|{datetime.now().isoformat(timespec='seconds')}"
+                elif reason and reason.startswith("could not read"):
+                    pass                            # e.g. a network drop: try again next run
                 else:
                     seen[str(p)] = stamp
                 continue
