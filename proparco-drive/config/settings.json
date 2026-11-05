@@ -1,6 +1,6 @@
 {
   "data_dir": "~/proparco-data",
-  "threads": 4,
+  "threads": 8,
   "api_key": "auto",
   "auto_approve": false,
   "quick_run_on_start": true,

@@ -22,6 +22,7 @@ import json
 import os
 import re
 import sys
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,9 @@ from xml.etree import ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from engine import load_config  # noqa: E402
+
+PDF_MAX_PAGES = 300        # a single huge PDF must not stall the run
+PDF_MAX_SECONDS = 60
 
 TEXT_EXT = {".txt", ".md", ".csv", ".json", ".xml", ".log"}
 HTML_EXT = {".html", ".htm"}
@@ -119,13 +123,25 @@ def pdf_text(path):
     except ImportError:
         return None, "PDF reader (pypdf) not available"
     reader = PdfReader(str(path))
-    pages = []
+    if reader.is_encrypted:
+        try:
+            if not reader.decrypt(""):          # most "encrypted" PDFs only restrict printing/copying
+                return None, "password-protected PDF"
+        except Exception as err:
+            if "cryptography" in str(err) or "AES" in str(err):
+                return None, "encrypted PDF (encryption library missing on this drive)"
+            return None, "password-protected PDF"
+    pages, started, note = [], time.time(), ""
+    total = len(reader.pages)
     for i, page in enumerate(reader.pages, 1):
+        if i > PDF_MAX_PAGES or time.time() - started > PDF_MAX_SECONDS:
+            note = f"\n[long PDF: first {i - 1} of {total} pages read]"
+            break
         try:
             pages.append(f"[Page {i}]\n" + (page.extract_text() or ""))
         except Exception:
             pages.append(f"[Page {i}] (text could not be read)")
-    text = "\n".join(pages)
+    text = "\n".join(pages) + note
     if len(re.sub(r"\[Page \d+\]|\s", "", text)) < 20:
         return None, "no text layer (scanned PDF; would need OCR)"
     return text, None
@@ -360,8 +376,13 @@ def main():
     print("Reading (read-only): " + ", ".join(map(str, roots)))
     if excludes:
         print("Excluding paths containing: " + ", ".join(excludes))
-    todo = []
+    print("Listing files on the server (this can take a few minutes for large folders) ...",
+          flush=True)
+    todo, listed = [], 0
     for label, root, p, size, mtime in walk(roots, excludes):
+        listed += 1
+        if listed % 5000 == 0:
+            print(f"  {listed:,} files listed ...", flush=True)
         if mtime < cutoff:
             continue
         stamp = f"{size}:{int(mtime)}"
@@ -380,7 +401,7 @@ def main():
     todo.sort(key=lambda t: t[0], reverse=True)       # newest first
     if args.max_files:
         todo = todo[:args.max_files]
-    print(f"New or changed files to read: {len(todo):,}")
+    print(f"Files listed: {listed:,}. New or changed files to read: {len(todo):,}", flush=True)
 
     batch, skipped, n_docs, n_batches = [], [], 0, 0
 
@@ -410,58 +431,68 @@ def main():
         index_path.write_text(json.dumps(seen), encoding="utf-8")   # progress is kept
         batch = []
 
-    for i, (mtime, size, label, root, p, stamp) in enumerate(todo, 1):
-        rel = p.relative_to(root)
-        if size > args.max_mb * 1024 * 1024:
-            skipped.append((str(rel), f"larger than {args.max_mb:g} MB"))
-            seen[str(p)] = stamp
-            continue
-        text, reason = extract(p)
-        if reason == "no permission to read":
-            DENIED.setdefault(label, []).append(str(p))
-        if text is None or not text.strip():
-            skipped.append((str(rel), reason or "no text"))
-            if reason == "no permission to read":   # remembered; retried after retry_days
-                seen[str(p)] = f"denied|{stamp}|{datetime.now().isoformat(timespec='seconds')}"
-            else:
+    try:
+        for i, (mtime, size, label, root, p, stamp) in enumerate(todo, 1):
+            rel = p.relative_to(root)
+            print(f"  [{i:,}/{len(todo):,}] {p.name[:70]} ({size / 1024 / 1024:.1f} MB)", flush=True)
+            if size > args.max_mb * 1024 * 1024:
+                skipped.append((str(rel), f"larger than {args.max_mb:g} MB"))
                 seen[str(p)] = stamp
-            continue
-        text = re.sub(r"[ \t]+\n", "\n", text)
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
-        note = ""
-        if len(text) > args.max_chars:
-            text, note = text[:args.max_chars], " (long document: first part kept)"
-        props = office_properties(p)
-        top = rel.parts[0] if len(rel.parts) > 1 else "(top)"
-        header = [f"Document: {label}/{rel}"]
-        for k, lbl in (("title", "Title"), ("author", "Author"),
-                       ("last_modified_by", "Last edited by"), ("created", "Created")):
-            if props.get(k):
-                header.append(f"{lbl}: {props[k]}")
-        batch.append(({
-            "kind": "document",
-            "entryId": "doc-" + hashlib.sha1(f"{label}/{rel}".encode("utf-8")).hexdigest()[:24],
-            "conversationId": f"folder:{label}/{top}",
-            "threadTopic": f"{label}/{top}",
-            "subject": p.name + note,
-            "sender": props.get("author") or label,
-            "senderName": props.get("author") or label,
-            "senderEmail": "",
-            "to": [], "cc": [],
-            "receivedTime": datetime.fromtimestamp(mtime, timezone.utc).isoformat(),
-            "folder": f"{label}/{rel.parent}",
-            "sourcePath": str(p),
-            "properties": props,
-            "body": "\n".join(header) + "\n\n" + text,
-            "attachments": [],
-        }, (str(p), stamp)))
-        n_docs += 1
-        if len(batch) >= args.batch:
-            save_batch()
-        if i % 50 == 0:
-            print(f"  {i:,}/{len(todo):,} files checked, {n_docs:,} documents read ...", flush=True)
-    save_batch()
-    index_path.write_text(json.dumps(seen), encoding="utf-8")
+                continue
+            try:
+                text, reason = extract(p)
+            except Exception as err:                 # never let one file stop the run
+                if "cryptography" in str(err) or "AES" in str(err):
+                    text, reason = None, "encrypted PDF (encryption library missing on this drive)"
+                else:
+                    text, reason = None, f"could not read ({err.__class__.__name__})"
+            if reason == "no permission to read":
+                DENIED.setdefault(label, []).append(str(p))
+            if text is None or not text.strip():
+                skipped.append((str(rel), reason or "no text"))
+                if reason == "no permission to read":   # remembered; retried after retry_days
+                    seen[str(p)] = f"denied|{stamp}|{datetime.now().isoformat(timespec='seconds')}"
+                else:
+                    seen[str(p)] = stamp
+                continue
+            text = re.sub(r"[ \t]+\n", "\n", text)
+            text = re.sub(r"\n{3,}", "\n\n", text).strip()
+            note = ""
+            if len(text) > args.max_chars:
+                text, note = text[:args.max_chars], " (long document: first part kept)"
+            props = office_properties(p)
+            top = rel.parts[0] if len(rel.parts) > 1 else "(top)"
+            header = [f"Document: {label}/{rel}"]
+            for k, lbl in (("title", "Title"), ("author", "Author"),
+                           ("last_modified_by", "Last edited by"), ("created", "Created")):
+                if props.get(k):
+                    header.append(f"{lbl}: {props[k]}")
+            batch.append(({
+                "kind": "document",
+                "entryId": "doc-" + hashlib.sha1(f"{label}/{rel}".encode("utf-8")).hexdigest()[:24],
+                "conversationId": f"folder:{label}/{top}",
+                "threadTopic": f"{label}/{top}",
+                "subject": p.name + note,
+                "sender": props.get("author") or label,
+                "senderName": props.get("author") or label,
+                "senderEmail": "",
+                "to": [], "cc": [],
+                "receivedTime": datetime.fromtimestamp(mtime, timezone.utc).isoformat(),
+                "folder": f"{label}/{rel.parent}",
+                "sourcePath": str(p),
+                "properties": props,
+                "body": "\n".join(header) + "\n\n" + text,
+                "attachments": [],
+            }, (str(p), stamp)))
+            n_docs += 1
+            if len(batch) >= args.batch:
+                save_batch()
+            if i % 50 == 0:
+                print(f"  -- {i:,}/{len(todo):,} files checked, {n_docs:,} documents read", flush=True)
+    finally:                                    # whatever happens, keep what was read
+        save_batch()
+        index_path.write_text(json.dumps(seen), encoding="utf-8")
+
 
     reasons = {}
     for _, r in skipped:
