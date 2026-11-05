@@ -123,7 +123,10 @@ class Server:
         # The path is relative to the drive folder (the working directory), because
         # llamafile mis-reads absolute paths containing '@'. A self-contained .llamafile
         # also re-opens its own file to read the built-in model, so this matters there too.
-        if IS_WINDOWS:
+        # Two engines are supported: llamafile (default) and the standard llama.cpp server
+        # (llama-server[.exe]), e.g. for processors where llamafile's own routines misbehave.
+        llama_server = "llama-server" in program.name.lower() or s.get("engine") == "llama-server"
+        if IS_WINDOWS or llama_server:
             cmd = [str(program)]
         else:
             cmd = ["sh", program.relative_to(DRIVE_ROOT).as_posix()]
@@ -136,15 +139,17 @@ class Server:
             # llamafile mis-reads absolute paths containing '@', e.g. '@software-engineering'.
             cmd += ["-m", Path(s["model"]).as_posix()]
 
+        if not llama_server:
+            cmd += ["--server"]
         cmd += [
-            "--server",
             "--host", "127.0.0.1",          # only this computer can connect
             "--port", str(self.port),
             "-t", str(self.threads),
             "-c", str(s["ctx_size"]),
             "-np", "1",                      # one request at a time
-            "--gpu", "disable",              # CPU only; keeps llamafile's sandbox on
         ]
+        if not llama_server:
+            cmd += ["--gpu", "disable"]      # CPU only; keeps llamafile's sandbox on
         if s.get("embedding"):
             cmd.append("--embedding")
         if self.api_key:

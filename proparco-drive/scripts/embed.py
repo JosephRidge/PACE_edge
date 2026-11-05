@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 embed.py - clean, chunk, embed and store acquired emails in sqlite-vec.
 
@@ -28,6 +29,7 @@ import obs  # noqa: E402
 
 CHUNK_CHARS = 1400          # ~400 tokens; must stay under the server's 1024-token batch
 OVERLAP_CHARS = 200         # repeated text between neighbouring chunks
+MAX_CHUNKS_PER_DOCUMENT = 60   # documents (S-drive) are indexed more deeply than emails
 MAX_CHUNKS_PER_EMAIL = 8    # stops newsletters and long reports dominating the index
 COMMIT_EVERY = 10           # emails per database commit
 
@@ -214,7 +216,10 @@ def load_messages(run_dir):
             "body": m.get("body") or "",
             "run_folder": run_dir.name,
             "fingerprint": hashlib.sha1(
-                f"{sender}|{received_raw}|{m.get('subject')}".encode("utf-8")).hexdigest(),
+                (f"doc|{m.get('entryId')}|{hashlib.sha1((m.get('body') or '').encode('utf-8')).hexdigest()}"
+                 if m.get("kind") == "document" else
+                 f"{sender}|{received_raw}|{m.get('subject')}").encode("utf-8")).hexdigest(),
+            "kind": m.get("kind") or "email",
         }
 
 
@@ -312,28 +317,49 @@ def main():
     # ---- collect and clean new messages
     stats = dict(total=0, stored=0, duplicate=0, empty=0, no_email=0, chars_in=0, chars_out=0)
     seen, todo = set(), []
-    for run in runs:
-        for msg in load_messages(run):
+    all_msgs = [msg for run in runs for msg in load_messages(run)]
+    # documents read several times (changed files): only the newest version counts.
+    # Runs are in date order, so the last occurrence of a document is the newest one.
+    newest_doc = {m["entry_id"]: m["fingerprint"] for m in all_msgs if m.get("kind") == "document"}
+    for msg in all_msgs:
+        if True:
             stats["total"] += 1
+            if msg.get("kind") == "document" and newest_doc.get(msg["entry_id"]) != msg["fingerprint"]:
+                stats["duplicate"] += 1      # an older version of a changed document
+                continue
             # The same email can appear twice with different Outlook IDs, e.g. when it
             # sits in both searched folders. Catch both kinds of duplicate.
-            keys = {k for k in (msg["entry_id"], msg["fingerprint"]) if k}
+            is_doc = msg.get("kind") == "document"
+            # documents: same path, new content = a new version that replaces the old one
+            keys = ({msg["fingerprint"]} if is_doc else
+                    {k for k in (msg["entry_id"], msg["fingerprint"]) if k})
             if keys & seen:
                 stats["duplicate"] += 1
                 continue
             seen |= keys
-            if db and already_stored(db, msg):
+            if db and is_doc:
+                row = db.execute("SELECT fingerprint FROM messages WHERE entry_id = ?",
+                                 (msg["entry_id"],)).fetchone()
+                if row and row[0] == msg["fingerprint"]:
+                    stats["stored"] += 1
+                    continue
+                msg["replace"] = bool(row)
+            elif db and already_stored(db, msg):
                 stats["stored"] += 1
                 continue
-            msg["body_clean"] = clean_body(msg["body"])
+            # documents (S-drive) are not emails: no quote/signature cleaning
+            msg["body_clean"] = (re.sub(r"\n{3,}", "\n\n", msg["body"]).strip()
+                                 if msg.get("kind") == "document" else clean_body(msg["body"]))
             stats["chars_in"] += len(msg["body"])
             stats["chars_out"] += len(msg["body_clean"])
-            if not msg["sender_email"]:
+            if not msg["sender_email"] and msg.get("kind") != "document":
                 stats["no_email"] += 1
             if not msg["body_clean"]:
                 stats["empty"] += 1
                 continue
-            msg["chunks"] = chunk_text(msg["body_clean"])[:MAX_CHUNKS_PER_EMAIL]
+            msg["chunks"] = chunk_text(msg["body_clean"])[
+                :cfg.get("embedding", {}).get("doc_max_chunks", MAX_CHUNKS_PER_DOCUMENT)
+                if msg.get("kind") == "document" else MAX_CHUNKS_PER_EMAIL]
             todo.append(msg)
 
     if args.limit:
@@ -391,6 +417,12 @@ def main():
             ob.model_call("embedding", "embed_email", time.time() - t0, usage=usage,
                           email=email_id, chunks=len(m["chunks"]))
 
+            if m.get("replace"):          # newer version of a document: drop the old one
+                old = m["entry_id"]
+                db.execute("DELETE FROM vec_chunks WHERE rowid IN "
+                           "(SELECT id FROM chunks WHERE entry_id = ?)", (old,))
+                db.execute("DELETE FROM chunks WHERE entry_id = ?", (old,))
+                db.execute("DELETE FROM messages WHERE entry_id = ?", (old,))
             cur = db.execute(
                 "INSERT OR IGNORE INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (m["entry_id"] or m["fingerprint"], m["fingerprint"], m["conversation_id"],
