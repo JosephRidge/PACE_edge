@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 embed.py - clean, chunk, embed and store acquired emails in sqlite-vec.
 
@@ -28,6 +29,7 @@ import obs  # noqa: E402
 
 CHUNK_CHARS = 1400          # ~400 tokens; must stay under the server's 1024-token batch
 OVERLAP_CHARS = 200         # repeated text between neighbouring chunks
+MAX_CHUNKS_PER_DOCUMENT = 60   # documents (S-drive) are indexed more deeply than emails
 MAX_CHUNKS_PER_EMAIL = 8    # stops newsletters and long reports dominating the index
 COMMIT_EVERY = 10           # emails per database commit
 
@@ -214,7 +216,10 @@ def load_messages(run_dir):
             "body": m.get("body") or "",
             "run_folder": run_dir.name,
             "fingerprint": hashlib.sha1(
-                f"{sender}|{received_raw}|{m.get('subject')}".encode("utf-8")).hexdigest(),
+                (f"doc|{m.get('entryId')}|{hashlib.sha1((m.get('body') or '').encode('utf-8')).hexdigest()}"
+                 if m.get("kind") == "document" else
+                 f"{sender}|{received_raw}|{m.get('subject')}").encode("utf-8")).hexdigest(),
+            "kind": m.get("kind") or "email",
         }
 
 
@@ -293,6 +298,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="report only; no AI, no database writes")
     ap.add_argument("--show", type=int, default=0, help="print N cleaned emails (with --dry-run)")
     ap.add_argument("--limit", type=int, default=0, help="only process the first N new emails")
+    ap.add_argument("--documents", action="store_true",
+                    help="server documents only, into server.db (default: emails only, into proparco.db)")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -302,7 +309,8 @@ def main():
     if not runs:
         sys.exit(f"No acquisition.json found under {source}")
 
-    db_path = cfg["_data_dir"] / "db" / "proparco.db"
+    # Emails (personal) and server documents (shared) live in separate databases.
+    db_path = cfg["_data_dir"] / "db" / ("server.db" if args.documents else "proparco.db")
     # A dry run still reads an existing database, so "already in database" is accurate.
     if args.dry_run and not db_path.exists():
         db, sqlite_vec = None, None
@@ -312,28 +320,56 @@ def main():
     # ---- collect and clean new messages
     stats = dict(total=0, stored=0, duplicate=0, empty=0, no_email=0, chars_in=0, chars_out=0)
     seen, todo = set(), []
+    all_msgs = []
     for run in runs:
-        for msg in load_messages(run):
+        try:
+            all_msgs += [msg for msg in load_messages(run)
+                         if (msg.get("kind") == "document") == bool(args.documents)]
+        except (ValueError, OSError) as err:      # e.g. an empty file left by an interrupted save
+            print(f"WARNING: skipping unreadable capture {run.name} ({err.__class__.__name__})")
+            ob.warn("unreadable capture skipped", run=run.name, error=str(err)[:200])
+    # documents read several times (changed files): only the newest version counts.
+    # Runs are in date order, so the last occurrence of a document is the newest one.
+    newest_doc = {m["entry_id"]: m["fingerprint"] for m in all_msgs if m.get("kind") == "document"}
+    for msg in all_msgs:
+        if True:
             stats["total"] += 1
+            if msg.get("kind") == "document" and newest_doc.get(msg["entry_id"]) != msg["fingerprint"]:
+                stats["duplicate"] += 1      # an older version of a changed document
+                continue
             # The same email can appear twice with different Outlook IDs, e.g. when it
             # sits in both searched folders. Catch both kinds of duplicate.
-            keys = {k for k in (msg["entry_id"], msg["fingerprint"]) if k}
+            is_doc = msg.get("kind") == "document"
+            # documents: same path, new content = a new version that replaces the old one
+            keys = ({msg["fingerprint"]} if is_doc else
+                    {k for k in (msg["entry_id"], msg["fingerprint"]) if k})
             if keys & seen:
                 stats["duplicate"] += 1
                 continue
             seen |= keys
-            if db and already_stored(db, msg):
+            if db and is_doc:
+                row = db.execute("SELECT fingerprint FROM messages WHERE entry_id = ?",
+                                 (msg["entry_id"],)).fetchone()
+                if row and row[0] == msg["fingerprint"]:
+                    stats["stored"] += 1
+                    continue
+                msg["replace"] = bool(row)
+            elif db and already_stored(db, msg):
                 stats["stored"] += 1
                 continue
-            msg["body_clean"] = clean_body(msg["body"])
+            # documents (S-drive) are not emails: no quote/signature cleaning
+            msg["body_clean"] = (re.sub(r"\n{3,}", "\n\n", msg["body"]).strip()
+                                 if msg.get("kind") == "document" else clean_body(msg["body"]))
             stats["chars_in"] += len(msg["body"])
             stats["chars_out"] += len(msg["body_clean"])
-            if not msg["sender_email"]:
+            if not msg["sender_email"] and msg.get("kind") != "document":
                 stats["no_email"] += 1
             if not msg["body_clean"]:
                 stats["empty"] += 1
                 continue
-            msg["chunks"] = chunk_text(msg["body_clean"])[:MAX_CHUNKS_PER_EMAIL]
+            msg["chunks"] = chunk_text(msg["body_clean"])[
+                :cfg.get("embedding", {}).get("doc_max_chunks", MAX_CHUNKS_PER_DOCUMENT)
+                if msg.get("kind") == "document" else MAX_CHUNKS_PER_EMAIL]
             todo.append(msg)
 
     if args.limit:
@@ -343,7 +379,8 @@ def main():
     saved = 100 * (1 - stats["chars_out"] / stats["chars_in"]) if stats["chars_in"] else 0
 
     print(f"Run folders:              {len(runs)}")
-    print(f"Emails found:             {stats['total']}")
+    noun = "documents" if args.documents else "emails"
+    print(f"{noun.capitalize() + ' found:':<26}{stats['total']}")
     print(f"  already in database:    {stats['stored']}")
     print(f"  duplicates in source:   {stats['duplicate']}")
     print(f"  empty after cleaning:   {stats['empty']}")
@@ -381,16 +418,45 @@ def main():
     prefix = cfg["embedding"].get("doc_prefix", "")
     started, done_chunks = time.time(), 0
     with Engines(cfg, only=["embedding"], obs=ob) as eng:
+        failed_docs = 0
         for i, m in enumerate(todo, 1):
             header = f"Subject: {m['subject']}\nFrom: {m['sender']}\n\n"
             email_id = obs.short_id(m["entry_id"] or m["fingerprint"])
             t0 = time.time()
-            with ob.stage("embed_email", email=email_id):
-                vectors, usage = eng.embed([prefix + header + c for c in m["chunks"]],
-                                           return_usage=True)
+            texts = [prefix + header + c for c in m["chunks"]]
+            try:
+                with ob.stage("embed_email", email=email_id):
+                    vectors, usage = eng.embed(texts, return_usage=True)
+            except RuntimeError:
+                # e.g. one piece too long for the model: embed piece by piece, shortening
+                # any piece that still fails; skip only what cannot be embedded at all
+                vectors, kept, usage = [], [], {}
+                for c, t in zip(m["chunks"], texts):
+                    for cut in (1.0, 0.5, 0.25):
+                        try:
+                            vectors.append(eng.embed([t[:max(200, int(len(t) * cut))]])[0])
+                            kept.append(c)
+                            break
+                        except RuntimeError:
+                            continue
+                skipped_pieces = len(m["chunks"]) - len(kept)
+                if skipped_pieces:
+                    ob.warn("pieces skipped (could not be embedded)", email=email_id,
+                            skipped=skipped_pieces)
+                if not kept:
+                    failed_docs += 1
+                    print(f"  WARNING: could not embed '{(m['subject'] or '')[:60]}'; skipped")
+                    continue
+                m["chunks"] = kept
             ob.model_call("embedding", "embed_email", time.time() - t0, usage=usage,
                           email=email_id, chunks=len(m["chunks"]))
 
+            if m.get("replace"):          # newer version of a document: drop the old one
+                old = m["entry_id"]
+                db.execute("DELETE FROM vec_chunks WHERE rowid IN "
+                           "(SELECT id FROM chunks WHERE entry_id = ?)", (old,))
+                db.execute("DELETE FROM chunks WHERE entry_id = ?", (old,))
+                db.execute("DELETE FROM messages WHERE entry_id = ?", (old,))
             cur = db.execute(
                 "INSERT OR IGNORE INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (m["entry_id"] or m["fingerprint"], m["fingerprint"], m["conversation_id"],
@@ -416,12 +482,12 @@ def main():
                 elapsed = time.time() - started
                 rate = done_chunks / elapsed if elapsed else 0
                 left = (n_chunks - done_chunks) / rate if rate else 0
-                print(f"  {i}/{len(todo)} emails | {done_chunks}/{n_chunks} chunks | "
+                print(f"  {i}/{len(todo)} {noun} | {done_chunks}/{n_chunks} chunks | "
                       f"{rate:.1f} chunks/s | ~{left / 60:.0f} min left", flush=True)
 
     total = db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
     print(f"\nDone in {(time.time() - started) / 60:.1f} min. "
-          f"Database now holds {total} emails: {db_path}")
+          f"Database now holds {total} {noun}: {db_path}")
     ob.finish("ok", emails_processed=len(todo), chunks_embedded=done_chunks,
               database_emails=total)
     db.close()
@@ -431,7 +497,7 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nStopped. Finished emails are saved; run again to continue.")
+        print("\nStopped. Finished items are saved; run again to continue.")
         obs.finish_active("interrupted")
     except RuntimeError as err:
         print(f"\nERROR: {err}")

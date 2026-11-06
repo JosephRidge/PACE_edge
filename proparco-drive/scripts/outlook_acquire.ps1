@@ -165,14 +165,34 @@ if ($Selected) {
     }
 } else {
     $since = (Get-Date).AddDays(-$DaysBack)
-    foreach ($f in $Folders) {
-        $folder = $ns.GetDefaultFolder($FolderIds[$f])
+    # Use the mailbox open on screen: the folder shown in Outlook plus that mailbox's Sent folder.
+    # (The "default" mailbox can be a different, empty one when several accounts are configured.)
+    $targets = @()
+    try {
+        $explorer = $outlook.ActiveExplorer()
+        if ($explorer -and $explorer.CurrentFolder) {
+            $cur = $explorer.CurrentFolder
+            $targets += ,@($cur, "Inbox")
+            try { $targets += ,@($cur.Store.GetDefaultFolder(5), "SentMail") } catch {}
+        }
+    } catch {}
+    if ($targets.Count -eq 0) {
+        foreach ($f in $Folders) { $targets += ,@($ns.GetDefaultFolder($FolderIds[$f]), $f) }
+    }
+    foreach ($pair in $targets) {
+        $folder = $pair[0]; $f = $pair[1]
+        if ($Folders -notcontains $f) { continue }
         $searched += $folder.Name
         $field = $(if ($f -eq "SentMail") { "[SentOn]" } else { "[ReceivedTime]" })
-        $items = $folder.Items.Restrict("$field >= '" + $since.ToString("g") + "'")
-        $items.Sort($field, $true)      # newest first
+        # No date filter string (Outlook reads it in the laptop's regional format, which can
+        # silently match nothing). Sort newest first and stop at the first older item instead.
+        $items = $folder.Items
+        $items.Sort($field, $true)
         foreach ($m in $items) {
             if ($messages.Count -ge $MaxMessages) { break }
+            $when = $null
+            try { $when = $(if ($f -eq "SentMail") { $m.SentOn } else { $m.ReceivedTime }) } catch {}
+            if ($when -and ([datetime]$when) -lt $since) { break }
             Add-Mail $m $f
         }
     }

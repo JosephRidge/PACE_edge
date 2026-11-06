@@ -50,9 +50,10 @@ def load_config(path=None):
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
 
-    data_dir = Path(os.path.expanduser(cfg["data_dir"]))
+    # PROPARCO_DATA_DIR overrides the setting for one run (e.g. a clean test folder).
+    data_dir = Path(os.path.expanduser(os.environ.get("PROPARCO_DATA_DIR") or cfg["data_dir"]))
     if not data_dir.is_absolute():
-        data_dir = DRIVE_ROOT / data_dir
+        data_dir = (DRIVE_ROOT / data_dir).resolve()   # "../proparco-data" = next to the package
     cfg["_data_dir"] = data_dir
 
     # "auto" = a new random key for every run. It is never written to disk.
@@ -61,19 +62,92 @@ def load_config(path=None):
     return cfg
 
 
+LLAMAFILE = "bin/llamafile-0.10.6-thin"
+
+
 def _program_path(rel):
-    """Path to a program on the drive. On Windows, use the .exe copy if it exists."""
+    """Path to a program on the drive. On Windows, use the .exe copy if it exists.
+    Elsewhere, a Windows-only program (e.g. llama-server.exe chosen on a Windows laptop)
+    falls back to the portable llamafile, so the same drive works on Linux too."""
     p = DRIVE_ROOT / rel
     if IS_WINDOWS and p.suffix.lower() != ".exe":
         exe = p.with_name(p.name + ".exe")
         if exe.exists():
             return exe
+    if not IS_WINDOWS and p.suffix.lower() == ".exe":
+        native = p.with_suffix("")                      # e.g. a Linux llama-server next to it
+        return native if native.exists() else DRIVE_ROOT / LLAMAFILE
     return p
 
 
 def _port_in_use(port):
     with socket.socket() as s:
         return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def read_env_files(cfg=None):
+    """KEY=VALUE pairs from .env files: next to the drive folder (stick root), the drive folder,
+    then the data folder (later wins). Never printed or logged. # starts a comment."""
+    places = [DRIVE_ROOT.parent / ".env", DRIVE_ROOT / ".env"]
+    if cfg is not None:
+        places += [cfg["_data_dir"] / ".env", cfg["_data_dir"] / "secrets" / ".env"]
+    values = {}
+    for f in places:
+        try:
+            text = f.read_text(encoding="utf-8-sig")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip().removeprefix("export ").strip()
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
+            values[key] = val
+    return values
+
+
+def secret(name, cfg=None, aliases=()):
+    """A secret from the environment or a .env file (environment wins)."""
+    for key in (name, *aliases):
+        if os.environ.get(key, "").strip():
+            return os.environ[key].strip()
+    env = read_env_files(cfg)
+    for key in (name, *aliases):
+        if env.get(key, "").strip():
+            return env[key].strip()
+    return ""
+
+
+def resolve_threads(value):
+    """'auto' (or 0): one thread per physical core, which is usually fastest for these models.
+    Most processors run two threads per core, so half the logical count (at least 2)."""
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.isdigit() and int(value) > 0:
+        return int(value)
+    logical = os.cpu_count() or 4
+    return max(2, logical // 2) if logical >= 4 else logical
+
+
+def _clean_vector(v):
+    """Embedding servers can return nested lists or nulls (e.g. for NaN values on some CPUs).
+    Return a flat list of plain floats, so storing it can never fail."""
+    if v and isinstance(v[0], list):          # per-token output: average into one vector
+        n = len(v)
+        v = [sum(col) / n for col in zip(*[[x if isinstance(x, (int, float)) else 0.0 for x in row]
+                                          for row in v])]
+    out = []
+    for x in v:
+        try:
+            f = float(x)
+            out.append(f if math.isfinite(f) else 0.0)
+        except (TypeError, ValueError):
+            out.append(0.0)
+    return out
 
 
 # ---------------------------------------------------------------- one server
@@ -105,7 +179,10 @@ class Server:
         # The path is relative to the drive folder (the working directory), because
         # llamafile mis-reads absolute paths containing '@'. A self-contained .llamafile
         # also re-opens its own file to read the built-in model, so this matters there too.
-        if IS_WINDOWS:
+        # Two engines are supported: llamafile (default) and the standard llama.cpp server
+        # (llama-server[.exe]), e.g. for processors where llamafile's own routines misbehave.
+        llama_server = "llama-server" in program.name.lower() or s.get("engine") == "llama-server"
+        if IS_WINDOWS or llama_server:
             cmd = [str(program)]
         else:
             cmd = ["sh", program.relative_to(DRIVE_ROOT).as_posix()]
@@ -118,15 +195,17 @@ class Server:
             # llamafile mis-reads absolute paths containing '@', e.g. '@software-engineering'.
             cmd += ["-m", Path(s["model"]).as_posix()]
 
+        if not llama_server:
+            cmd += ["--server"]
         cmd += [
-            "--server",
             "--host", "127.0.0.1",          # only this computer can connect
             "--port", str(self.port),
             "-t", str(self.threads),
             "-c", str(s["ctx_size"]),
             "-np", "1",                      # one request at a time
-            "--gpu", "disable",              # CPU only; keeps llamafile's sandbox on
         ]
+        if not llama_server:
+            cmd += ["--gpu", "disable"]      # CPU only; keeps llamafile's sandbox on
         if s.get("embedding"):
             cmd.append("--embedding")
         if self.api_key:
@@ -222,7 +301,7 @@ class Engines:
         obs: optional Observer (obs.py) to log server start-up, readiness and shutdown."""
         self.obs = obs
         log_dir = cfg["_data_dir"] / "logs"
-        threads = cfg.get("threads", 4)
+        threads = resolve_threads(cfg.get("threads", "auto"))
         key = cfg.get("api_key") or None
         self.cfg = cfg
         self.gen = Server("generation", cfg["generation"], threads, key, log_dir)
@@ -268,11 +347,18 @@ class Engines:
         """Return one vector per text, in the same order (and token usage if asked)."""
         resp = self.emb.post("/v1/embeddings", {"input": list(texts)}, timeout=300)
         data = resp["data"]
-        vectors = [d["embedding"] for d in sorted(data, key=lambda d: d["index"])]
+        vectors = [_clean_vector(d["embedding"]) for d in sorted(data, key=lambda d: d["index"])]
         want = self.cfg["embedding"]["dimension"]
         if vectors and len(vectors[0]) != want:
             raise RuntimeError(f"Embedding size is {len(vectors[0])}, config expects {want}.")
         return (vectors, resp.get("usage", {})) if return_usage else vectors
+
+    def count_tokens(self, text):
+        """Exact token count from the writer model; a cautious estimate if unavailable."""
+        try:
+            return len(self.gen.post("/tokenize", {"content": text}, timeout=60)["tokens"])
+        except Exception:
+            return len(text) // 2
 
     def chat(self, messages, max_tokens=300, temperature=0.2, return_timings=False, **extra):
         """extra: any other server option, e.g. response_format for JSON output."""

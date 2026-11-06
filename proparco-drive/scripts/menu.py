@@ -25,6 +25,7 @@ def run(script, *args, pause=True):
               f"The message above says why; option 11 shows logged errors.")
     if pause:
         input("\nPress Enter to return to the menu ...")
+    return result.returncode == 0
 
 
 def ask(prompt):
@@ -55,15 +56,28 @@ def run_outlook(*args):
     shell = shutil.which("powershell") or shutil.which("pwsh")
     out = str(load_config()["_data_dir"] / "acquisitions")
     print()
-    # No execution-policy bypass: if Windows blocks scripts, that is a decision for IT.
-    result = subprocess.run([shell, "-NoProfile", "-File", str(HERE / "outlook_acquire.ps1"),
+    # "-ExecutionPolicy Bypass" applies to this one PowerShell process only and changes no setting.
+    # A policy enforced by IT through Group Policy still takes precedence.
+    result = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(HERE / "outlook_acquire.ps1"),
                              *args, "-OutRoot", out], cwd=str(HERE.parent))
     if result.returncode != 0:
-        print("\nThe Outlook export did not finish. If Windows says running scripts is "
-              "disabled, ask IT; do not change the execution policy on a work laptop.")
+        print("\nThe Outlook export did not finish (see the message above). Check that classic "
+              "Outlook is open. If scripts are still blocked, the policy is enforced by IT.")
         input("\nPress Enter to return to the menu ...")
         return False
     return True
+
+
+def ask_days():
+    """Days back: a number only. Anything else is refused, never used or shown again."""
+    while True:
+        value = input("How many days back? [30] ").strip()
+        if not value:
+            return "30"
+        if value.isdigit() and 0 < int(value) <= 3650:
+            return value
+        print("Please type a number of days (for example 30), or press Enter for 30.")
+        print("(Never type a password here; it is only asked for at the password prompt.)")
 
 
 def offer_embed():
@@ -87,31 +101,32 @@ def fetch_menu():
         input("Press Enter when they are selected ...")
         ok = run_outlook("-Selected")
     elif choice == "2":
-        days = input("How many days back? [30] ").strip() or "30"
-        ok = days.isdigit() and run_outlook("-DaysBack", days)
+        ok = run_outlook("-DaysBack", ask_days())
     elif choice == "3":
         user = ask("Gmail address: ")
         if not user:
             return
-        days = input("How many days back? [30] ").strip() or "30"
+        days = ask_days()
         query = input('Optional Gmail search, e.g. label:proparco [none]: ').strip()
-        args = ["imap", "--user", user, "--days", days if days.isdigit() else "30"]
+        print("\nNext you will be asked for a Google APP PASSWORD (16 letters, from")
+        print("myaccount.google.com/apppasswords), not your normal Google password.")
+        args = ["imap", "--user", user, "--days", days]
         if query:
             args += ["--query", query]
-        run("gmail_acquire.py", *args, pause=False)
-        ok = True
+        ok = run("gmail_acquire.py", *args, pause=False)
     elif choice == "4":
         path = ask("Full path of the .mbox file: ")
         if not path:
             return
-        days = input("How many days back? [30] ").strip() or "30"
-        run("gmail_acquire.py", "mbox", "--file", path.strip('"'),
-            "--days", days if days.isdigit() else "30", pause=False)
-        ok = True
+        ok = run("gmail_acquire.py", "mbox", "--file", path.strip('"'),
+                 "--days", ask_days(), pause=False)
     else:
         return
     if ok:
         offer_embed()
+    else:
+        print("\nNothing new was fetched, so there is nothing to embed.")
+        input("Press Enter to return to the menu ...")
 
 
 def _latest_outlook_run(data):
@@ -211,10 +226,13 @@ def _on_removable_media(path):
     return str(path).startswith(("/media/", "/run/media/", "/Volumes/"))
 
 
-def first_run_check(cfg):
+def stick_guard(cfg):
+    """Warn (and stop unless confirmed) if client data would be written onto the stick."""
     data = cfg["_data_dir"]
     # Running from a stick and data on that same stick: client emails would be carried around.
     # Running the package from the laptop's own disk (e.g. if USB is blocked) is fine.
+    if cfg.get("data_on_drive"):
+        return                                   # deliberate choice: data travels with the stick
     if _on_removable_media(DRIVE_ROOT) and _same_disk(data, DRIVE_ROOT):
         print("\n" + "!" * 60)
         print(" WARNING: the data folder is on the same disk as this program:")
@@ -225,6 +243,11 @@ def first_run_check(cfg):
         print("!" * 60)
         if input("\nContinue anyway? [y/N] ").strip().lower() != "y":
             sys.exit(1)
+
+
+def first_run_check(cfg):
+    data = cfg["_data_dir"]
+    stick_guard(cfg)
     if data.exists():
         return
     print("\n" + "=" * 60)
@@ -276,6 +299,11 @@ def status_line(cfg):
 
 def main():
     cfg = load_config()
+    if "--menu" not in sys.argv and cfg.get("start_mode", "menu") == "auto":
+        stick_guard(cfg)
+        import autorun                      # plug-and-play client flow, no questions
+        autorun.main()
+        return
     first_run_check(cfg)
     if platform.system() == "Windows" and cfg.get("quick_run_on_start", True):
         if input("\nProcess the emails selected in Outlook now? [Y/n] ").strip().lower() in ("", "y", "yes"):
@@ -283,6 +311,9 @@ def main():
     while True:
         print("\n" + "=" * 60)
         print(" Proparco email assistant (local)")
+        if not (DRIVE_ROOT / "SHA256SUMS.txt").exists():
+            print(" DEVELOPER FOLDER: menu mode. Clients run the built package")
+            print(" (start.bat / start.sh on the flash disk), which starts automatically.")
         print(f" Data folder: {cfg['_data_dir']}")
         print(f" Status: {status_line(cfg)}")
         print("=" * 60)

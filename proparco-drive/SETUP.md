@@ -30,14 +30,34 @@ Nothing to install. Everything needed is on the flash disk.
 
 ## First time only
 
-The first time you start the assistant on a computer, it offers to create its data folder:
-`C:\Users\<you>\proparco-data` on Windows, `~/proparco-data` on Linux. Answer **Y**.
+The first start creates the data folder **on the flash disk**, next to the program:
 
-This folder holds your emails, results and logs. It is on your computer's own disk, never on
-the flash disk, and it starts empty: the assistant only ever works with emails you fetch
-yourself (option 15).
+```
+FLASH DISK
+├── proparco-drive/   the program and AI models
+└── proparco-data/    your emails, attachments, results and logs (created at first use)
+```
 
-## Every time
+It starts empty: the assistant only works with emails it fetches from your own Outlook.
+Because your emails now travel with the stick, **keep the stick safe and use an encrypted
+stick** (on Windows: right-click the drive → *Turn on BitLocker*, if your IT allows it).
+If the stick is lost, the emails on it are lost with it.
+
+## Every time: plug in and double-click
+
+1. Plug in the flash disk, open `proparco-drive` and double-click **`start.bat`**
+   (Linux: `sh start.sh`). Keep classic Outlook open.
+2. That is all. Without any questions it fetches **new emails** from Outlook (the first time:
+   the last 30 days; afterwards: everything since the last run), makes them searchable,
+   writes the three fields for the new emails and opens the results in your browser.
+3. The first run can take a while (about 1 to 2 minutes per email); you can keep working.
+   If you close the window, the next start continues where it stopped.
+4. When it says *Done*, close the window and eject the flash disk.
+
+## The full menu (testers and advanced use)
+
+Double-click **`advanced-menu.bat`** (Linux: `sh advanced-menu.sh`) for every function
+separately:
 
 1. Plug in the flash disk and open the `proparco-drive` folder on it.
 2. Start the assistant:
@@ -269,16 +289,20 @@ sh start.sh
 To measure the real start-up time, eject and re-plug the disk first; otherwise the models
 are still cached in memory.
 
-**What goes on a flash disk:** only the `proparco-drive` folder exactly as the build makes it
+**What goes on a flash disk before handing it over:** only the `proparco-drive` folder exactly as the build makes it
 (about 2.9 GB): launchers, guides, `VERSION.txt`, `SHA256SUMS.txt`, `config/`, `scripts/`
 (including both email extractors), `bin/` (the engine, Linux and `.exe`), `models/` (the two
 GGUF files) and `python/` (portable Windows Python, sqlite-vec for both systems).
 
-**Never on a flash disk:**
+The client's data folder (`proparco-data`, next to `proparco-drive`) is created **on the stick**
+at first use and then holds that client's emails. A stick handed to a **new** user must
+therefore not contain one yet.
+
+**Never on a flash disk you hand over:**
 
 | Item | Why, and where it belongs |
 |---|---|
-| `proparco-data/` (emails, `proparco.db`, logs, `viewer.html`, dashboard) | Client data; created on each laptop at first run |
+| Someone else's `proparco-data/` (emails, `proparco.db`, logs, `viewer.html`) | Another user's client data; each stick starts empty and creates its own |
 | Test data or earlier email exports | Real client emails; the developer's machine only |
 | The `.llamafile` (3.4 GB) | Not needed; the package uses the extracted GGUF |
 | `env/`, `.git/`, `dist/`, `__pycache__/` | Developer files |
@@ -302,7 +326,8 @@ Rebuild only after changing code, settings, guides or models; each rebuild write
 
 | Setting | Meaning |
 |---|---|
-| `data_dir` | data folder (on the build: `~/proparco-data`) |
+| `data_dir` | data folder. Package default: `../proparco-data` (on the flash disk, next to `proparco-drive`); build with `--data-on-laptop` for `~/proparco-data` on the laptop |
+| `data_on_drive` | `true` when the data deliberately lives on the flash disk (set by the build) |
 | `threads` | CPU threads for the models; match the physical cores |
 | `api_key` | `"auto"`: new random key every run |
 | `auto_approve` | `false`: results wait for review before Notion |
@@ -313,6 +338,9 @@ Rebuild only after changing code, settings, guides or models; each rebuild write
 | `generation.include_quoted_history` | `"first_email"`: keep quoted earlier messages for forwards and a thread's first email |
 | `generation.est_read_tok_s` / `est_write_tok_s` | speeds used by the time estimate; update after a health check |
 | `quick_run_on_start` | `true`: on Windows, offer to process the emails selected in Outlook when the menu starts |
+| `start_mode` | `"auto"`: `start.bat` runs the plug-and-play flow (set by the build for every package); `"menu"`: full menu (recommended in a developer folder) |
+| `auto_source` | `"outlook"`: the automatic flow fetches from Outlook; `"none"`: only process emails already fetched |
+| `auto_first_fetch_days` | how far back the very first automatic fetch goes (default 30) |
 | `embedding.dimension` | 1024 for bge-m3; changing model means rebuilding the database |
 
 ## 2.7 Test results so far
