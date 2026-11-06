@@ -77,7 +77,11 @@ class Notion:
         self.token = token
         proxy = (ncfg.get("proxy") or secret("NOTION_PROXY", cfg)
                  or secret("HTTPS_PROXY", cfg, aliases=("https_proxy",)))
-        handlers = [urllib.request.ProxyHandler({"https": proxy, "http": proxy})] if proxy else []
+        if (proxy or "").strip().lower() in ("direct", "none", "off", "no"):
+            # e.g. NOTION_PROXY=direct outside the AFD network: connect without any proxy
+            handlers = [urllib.request.ProxyHandler({})]
+        else:
+            handlers = [urllib.request.ProxyHandler({"https": proxy, "http": proxy})] if proxy else []
         self.opener = urllib.request.build_opener(*handlers)
         self.calls = 0
         self._last = 0.0

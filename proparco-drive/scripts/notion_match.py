@@ -42,6 +42,9 @@ OWN_ORGANISATIONS = ("proparco", "afd", "agence francaise de developpement", "fi
 # Deals in these states are history: still shown, but ranked below live ones.
 INACTIVE = ("closed", "repaid", "exited", "written-off", "dropped", "abandoned")
 MAX_FANOUT = 3      # a counterparty mention spreads to at most this many live projects
+SECONDARY = 0.3     # weight when the organisation is only a co-lender/investor/channel on the deal
+GENERIC_DEAL_WORDS = {"tbd", "debt", "loan", "loans", "senior", "fund", "ii", "iii", "pe", "vc",
+                      "the", "and", "de", "of", "project", "new", "2", "3"}
 
 
 def load_threads(db_path, internal):
@@ -117,9 +120,13 @@ def main():
 
     projects = {p["id"]: p for p in d["projects"]}
     cps = {c["id"]: c for c in d["counterparties"] if not is_own(c["name"], internal)}
-    projects_of_cp = defaultdict(set)
+    # A counterparty's own "Related projects" are the deals where it is the client; deals that
+    # only list it among lenders/investors/channels are weaker evidence.
+    projects_of_cp, primary = defaultdict(set), defaultdict(set)
     for c in cps.values():
-        projects_of_cp[c["id"]].update(pid for pid in c["projects"] if pid in projects)
+        own = {pid for pid in c["projects"] if pid in projects}
+        projects_of_cp[c["id"]].update(own)
+        primary[c["id"]].update(own)
     for p in projects.values():
         for cid in p["counterparties"]:
             projects_of_cp[cid].add(p["id"])
@@ -138,10 +145,21 @@ def main():
     for conv, t in order:
         scores, evidence = defaultdict(float), defaultdict(list)
 
-        def credit(pid, kind, why):
-            if why not in evidence[pid]:
-                scores[pid] += WEIGHTS[kind]
-                evidence[pid].append(why)
+        credited = set()
+
+        def credit(pid, kind, why, cid=None):
+            # one credit per (deal, kind, organisation): three contacts at KCB count once
+            key = (pid, kind, cid or why)
+            if key in credited:
+                if why not in evidence[pid] and len(evidence[pid]) < 6:
+                    evidence[pid].append(why)
+                return
+            credited.add(key)
+            weight = WEIGHTS[kind]
+            if cid is not None and pid not in primary.get(cid, ()):
+                weight *= SECONDARY
+            scores[pid] += weight
+            evidence[pid].append(why)
 
         unknown = []
         for addr in sorted(t["emails"]):
@@ -150,7 +168,7 @@ def main():
                 for cid in contact["organisations"]:
                     for pid in projects_of_cp.get(cid, ()):
                         credit(pid, "contact", f"contact {contact['name'] or addr} "
-                                               f"({cps.get(cid, {}).get('name', '?')})")
+                                               f"({cps.get(cid, {}).get('name', '?')})", cid)
                 continue
             label = domain_label(addr)
             hit = False
@@ -158,7 +176,7 @@ def main():
                 for cid, c in cps.items():
                     if domain_matches(label, c["name"]):
                         for pid in projects_of_cp.get(cid, ()):
-                            credit(pid, "domain", f"domain {addr.split('@')[-1]} ~ {c['name']}")
+                            credit(pid, "domain", f"domain {addr.split('@')[-1]} ~ {c['name']}", cid)
                             hit = True
             if not hit:
                 unknown.append(addr)
@@ -174,10 +192,20 @@ def main():
                 live = [pid for pid in projects_of_cp.get(cid, ()) if not is_inactive(projects[pid]["status"])]
                 if len(live) <= MAX_FANOUT:
                     for pid in live:
-                        credit(pid, "counterparty", f"counterparty '{cps[cid]['name']}' mentioned")
+                        credit(pid, "counterparty", f"counterparty '{cps[cid]['name']}' mentioned", cid)
 
-        for pid in list(scores):                       # history ranks below live deals
-            if is_inactive(projects[pid]["status"]) and not any(e.startswith("contact") for e in evidence[pid]):
+        subject = " " + normalise(" ".join(t["subjects"])) + " "
+        for pid in list(scores):
+            org_words = {w for cid in projects[pid]["counterparties"] if cid in cps
+                         for w in normalise(cps[cid]["name"]).split()}
+            words = [w for w in normalise(projects[pid]["name"]).split()
+                     if len(w) >= 4 and not w.isdigit() and w not in GENERIC_DEAL_WORDS
+                     and w not in org_words and w not in WEAK_WORDS]
+            hits = [w for w in words if f" {w} " in subject or f" {w} " in text]
+            if hits:
+                scores[pid] += min(2.0, 1.0 * len(hits))
+                evidence[pid].append("deal word(s) in the email: " + ", ".join(hits[:3]))
+            if is_inactive(projects[pid]["status"]):     # history ranks below live deals
                 scores[pid] *= 0.5
 
         ranked = sorted(((s, pid) for pid, s in scores.items() if s >= args.min_score), reverse=True)[:5]

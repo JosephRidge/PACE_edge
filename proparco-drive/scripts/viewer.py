@@ -124,6 +124,19 @@ def collect(cfg):
                 last = results[m["entry_id"]]
                 break
         state = states.get(conv)
+        cur = None
+        if last is not None:
+            cur = {k: last[k] for k in ("latest_deal_summary", "next_steps", "project_history")
+                   if k in last.keys()}
+            if state is not None and "state_json" in state.keys():
+                try:                     # works with generate.py versions that store changes only
+                    import generate as G
+                    st = json.loads(state["state_json"])
+                    cur = {"latest_deal_summary": G.render_summary(st.get("summary")),
+                           "next_steps": G.render_steps(st.get("steps", [])),
+                           "project_history": "\n".join(st.get("history", []))}
+                except Exception:
+                    pass
         out.append({
             "id": conv,
             "title": clean_title(items[0]["subject"]),
@@ -135,9 +148,9 @@ def collect(cfg):
             "needsReview": sum(1 for e in emails if e["review"] == "needs_review"),
             "attachments": sum(len(e["attachments"]) for e in emails),
             "people": sorted(people.values(), key=lambda p: (-p["sent"], -p["received"])),
-            "summary": last["latest_deal_summary"] if last is not None else None,
-            "steps": last["next_steps"] if last is not None else None,
-            "history": last["project_history"] if last is not None else None,
+            "summary": cur["latest_deal_summary"] if cur else None,
+            "steps": cur["next_steps"] if cur else None,
+            "history": cur["project_history"] if cur else None,
             "emails": emails,
         })
     out.sort(key=lambda t: t["last"], reverse=True)

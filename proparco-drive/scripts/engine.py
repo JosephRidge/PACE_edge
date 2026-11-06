@@ -62,13 +62,21 @@ def load_config(path=None):
     return cfg
 
 
+LLAMAFILE = "bin/llamafile-0.10.6-thin"
+
+
 def _program_path(rel):
-    """Path to a program on the drive. On Windows, use the .exe copy if it exists."""
+    """Path to a program on the drive. On Windows, use the .exe copy if it exists.
+    Elsewhere, a Windows-only program (e.g. llama-server.exe chosen on a Windows laptop)
+    falls back to the portable llamafile, so the same drive works on Linux too."""
     p = DRIVE_ROOT / rel
     if IS_WINDOWS and p.suffix.lower() != ".exe":
         exe = p.with_name(p.name + ".exe")
         if exe.exists():
             return exe
+    if not IS_WINDOWS and p.suffix.lower() == ".exe":
+        native = p.with_suffix("")                      # e.g. a Linux llama-server next to it
+        return native if native.exists() else DRIVE_ROOT / LLAMAFILE
     return p
 
 
@@ -78,9 +86,9 @@ def _port_in_use(port):
 
 
 def read_env_files(cfg=None):
-    """KEY=VALUE pairs from .env files: the drive folder, then the data folder (later wins).
-    Never printed or logged. Lines starting with # are comments; quotes are stripped."""
-    places = [DRIVE_ROOT / ".env"]
+    """KEY=VALUE pairs from .env files: next to the drive folder (stick root), the drive folder,
+    then the data folder (later wins). Never printed or logged. # starts a comment."""
+    places = [DRIVE_ROOT.parent / ".env", DRIVE_ROOT / ".env"]
     if cfg is not None:
         places += [cfg["_data_dir"] / ".env", cfg["_data_dir"] / "secrets" / ".env"]
     values = {}

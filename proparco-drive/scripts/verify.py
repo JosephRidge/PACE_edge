@@ -22,7 +22,7 @@ import unicodedata
 ALLOWED_WORDS = {
     # domain terms and abbreviations
     "proparco", "afd", "client", "clients", "usd", "eur", "musd", "meur", "kes", "tzs", "ugx",
-    "esg", "nda", "ceo", "cfo", "sme", "smes", "loi", "mou", "ifc", "dfi", "dfis", "crm",
+    "esg", "nda", "ceo", "cfo", "sme", "smes", "msme", "msmes", "loi", "mou", "ifc", "dfi", "dfis", "crm",
     "board", "committee", "credit", "investment", "project", "bank", "group", "team",
     "not", "stated", "new", "update", "awaiting", "email", "emails", "proparco's",
     # calendar words
@@ -108,7 +108,11 @@ def _names(text):
 
 
 def _name_grounded(word, source_words):
-    w = _norm(word).strip("'’s")
+    # remove a possessive "'s" only (str.strip("'’s") also cut a leading "s": "Stanbic" -> "tanbic")
+    w = re.sub(r"['’]s$", "", _norm(word)).strip("'’")
+    if "-" in w:                       # "End-of-assignment": each part must appear in the source
+        parts = [x for x in w.split("-") if len(x) > 2]
+        return all(_name_grounded(x, source_words) for x in parts) if parts else True
     if len(w) <= 2:
         return True
     key = w[:5] if len(w) >= 5 else w
