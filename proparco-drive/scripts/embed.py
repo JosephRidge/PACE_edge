@@ -320,8 +320,14 @@ def main():
     # ---- collect and clean new messages
     stats = dict(total=0, stored=0, duplicate=0, empty=0, no_email=0, chars_in=0, chars_out=0)
     seen, todo = set(), []
-    all_msgs = [msg for run in runs for msg in load_messages(run)
-                if (msg.get("kind") == "document") == bool(args.documents)]
+    all_msgs = []
+    for run in runs:
+        try:
+            all_msgs += [msg for msg in load_messages(run)
+                         if (msg.get("kind") == "document") == bool(args.documents)]
+        except (ValueError, OSError) as err:      # e.g. an empty file left by an interrupted save
+            print(f"WARNING: skipping unreadable capture {run.name} ({err.__class__.__name__})")
+            ob.warn("unreadable capture skipped", run=run.name, error=str(err)[:200])
     # documents read several times (changed files): only the newest version counts.
     # Runs are in date order, so the last occurrence of a document is the newest one.
     newest_doc = {m["entry_id"]: m["fingerprint"] for m in all_msgs if m.get("kind") == "document"}
@@ -373,7 +379,8 @@ def main():
     saved = 100 * (1 - stats["chars_out"] / stats["chars_in"]) if stats["chars_in"] else 0
 
     print(f"Run folders:              {len(runs)}")
-    print(f"Emails found:             {stats['total']}")
+    noun = "documents" if args.documents else "emails"
+    print(f"{noun.capitalize() + ' found:':<26}{stats['total']}")
     print(f"  already in database:    {stats['stored']}")
     print(f"  duplicates in source:   {stats['duplicate']}")
     print(f"  empty after cleaning:   {stats['empty']}")
@@ -411,13 +418,36 @@ def main():
     prefix = cfg["embedding"].get("doc_prefix", "")
     started, done_chunks = time.time(), 0
     with Engines(cfg, only=["embedding"], obs=ob) as eng:
+        failed_docs = 0
         for i, m in enumerate(todo, 1):
             header = f"Subject: {m['subject']}\nFrom: {m['sender']}\n\n"
             email_id = obs.short_id(m["entry_id"] or m["fingerprint"])
             t0 = time.time()
-            with ob.stage("embed_email", email=email_id):
-                vectors, usage = eng.embed([prefix + header + c for c in m["chunks"]],
-                                           return_usage=True)
+            texts = [prefix + header + c for c in m["chunks"]]
+            try:
+                with ob.stage("embed_email", email=email_id):
+                    vectors, usage = eng.embed(texts, return_usage=True)
+            except RuntimeError:
+                # e.g. one piece too long for the model: embed piece by piece, shortening
+                # any piece that still fails; skip only what cannot be embedded at all
+                vectors, kept, usage = [], [], {}
+                for c, t in zip(m["chunks"], texts):
+                    for cut in (1.0, 0.5, 0.25):
+                        try:
+                            vectors.append(eng.embed([t[:max(200, int(len(t) * cut))]])[0])
+                            kept.append(c)
+                            break
+                        except RuntimeError:
+                            continue
+                skipped_pieces = len(m["chunks"]) - len(kept)
+                if skipped_pieces:
+                    ob.warn("pieces skipped (could not be embedded)", email=email_id,
+                            skipped=skipped_pieces)
+                if not kept:
+                    failed_docs += 1
+                    print(f"  WARNING: could not embed '{(m['subject'] or '')[:60]}'; skipped")
+                    continue
+                m["chunks"] = kept
             ob.model_call("embedding", "embed_email", time.time() - t0, usage=usage,
                           email=email_id, chunks=len(m["chunks"]))
 
@@ -452,12 +482,12 @@ def main():
                 elapsed = time.time() - started
                 rate = done_chunks / elapsed if elapsed else 0
                 left = (n_chunks - done_chunks) / rate if rate else 0
-                print(f"  {i}/{len(todo)} emails | {done_chunks}/{n_chunks} chunks | "
+                print(f"  {i}/{len(todo)} {noun} | {done_chunks}/{n_chunks} chunks | "
                       f"{rate:.1f} chunks/s | ~{left / 60:.0f} min left", flush=True)
 
     total = db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
     print(f"\nDone in {(time.time() - started) / 60:.1f} min. "
-          f"Database now holds {total} emails: {db_path}")
+          f"Database now holds {total} {noun}: {db_path}")
     ob.finish("ok", emails_processed=len(todo), chunks_embedded=done_chunks,
               database_emails=total)
     db.close()
@@ -467,7 +497,7 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nStopped. Finished emails are saved; run again to continue.")
+        print("\nStopped. Finished items are saved; run again to continue.")
         obs.finish_active("interrupted")
     except RuntimeError as err:
         print(f"\nERROR: {err}")

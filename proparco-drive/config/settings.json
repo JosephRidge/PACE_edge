@@ -7,6 +7,7 @@
   "start_mode": "menu",
   "auto_source": "outlook",
   "auto_first_fetch_days": 30,
+     "server_db_path": "C:\\server-agent\\db\\server.db",
   "internal_domains": [
     "proparco.fr",
     "afd.fr"
