@@ -77,6 +77,54 @@ def _port_in_use(port):
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def read_env_files(cfg=None):
+    """KEY=VALUE pairs from .env files: the drive folder, then the data folder (later wins).
+    Never printed or logged. Lines starting with # are comments; quotes are stripped."""
+    places = [DRIVE_ROOT / ".env"]
+    if cfg is not None:
+        places += [cfg["_data_dir"] / ".env", cfg["_data_dir"] / "secrets" / ".env"]
+    values = {}
+    for f in places:
+        try:
+            text = f.read_text(encoding="utf-8-sig")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip().removeprefix("export ").strip()
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
+            values[key] = val
+    return values
+
+
+def secret(name, cfg=None, aliases=()):
+    """A secret from the environment or a .env file (environment wins)."""
+    for key in (name, *aliases):
+        if os.environ.get(key, "").strip():
+            return os.environ[key].strip()
+    env = read_env_files(cfg)
+    for key in (name, *aliases):
+        if env.get(key, "").strip():
+            return env[key].strip()
+    return ""
+
+
+def resolve_threads(value):
+    """'auto' (or 0): one thread per physical core, which is usually fastest for these models.
+    Most processors run two threads per core, so half the logical count (at least 2)."""
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.isdigit() and int(value) > 0:
+        return int(value)
+    logical = os.cpu_count() or 4
+    return max(2, logical // 2) if logical >= 4 else logical
+
+
 def _clean_vector(v):
     """Embedding servers can return nested lists or nulls (e.g. for NaN values on some CPUs).
     Return a flat list of plain floats, so storing it can never fail."""
@@ -245,7 +293,7 @@ class Engines:
         obs: optional Observer (obs.py) to log server start-up, readiness and shutdown."""
         self.obs = obs
         log_dir = cfg["_data_dir"] / "logs"
-        threads = cfg.get("threads", 4)
+        threads = resolve_threads(cfg.get("threads", "auto"))
         key = cfg.get("api_key") or None
         self.cfg = cfg
         self.gen = Server("generation", cfg["generation"], threads, key, log_dir)
