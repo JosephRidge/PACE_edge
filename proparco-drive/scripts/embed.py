@@ -192,6 +192,31 @@ def find_runs(source):
     return sorted(p.parent for p in source.rglob("acquisition.json"))
 
 
+# Server documents that must not become searchable (matched against file name and folder path).
+# Deliberately precise: "résumé" (French: summary) is NOT matched, only English "resume";
+# "medical" is NOT listed (Proparco has healthcare deals). Add or remove with "index_exclude"
+# in settings.json, or --exclude on the command line.
+_W = r"(?<![a-z])"   # word edge: anything that is not a letter (underscores and digits count as edges,
+_E = r"(?![a-z])"    # so "6_04_Resume_Name" and "..._Invoice.pdf" are matched)
+SENSITIVE_DOCS = [
+    r"passe?port", r"pi[eè]ce.d.identit", r"carte.d.identit", _W + r"id.card" + _E, _W + r"cni" + _E,
+    _W + r"kyc" + _E,
+    _W + r"cv" + _E, r"curriculum", _W + r"resume" + _E, r"shortlist",
+    r"payslip", r"bulletin.de.paie", _W + r"salaires?" + _E, _W + r"salary" + _E, _W + r"payroll" + _E,
+    r"boarding.?pass", _W + r"e-?ticket" + _E, r"billet.d.avion", r"hotel.(bill|invoice)",
+    _W + r"invoices?" + _E, _W + r"receipts?" + _E, _W + r"factures?" + _E, r"note.de.frais",
+    r"remboursement.frais", r"mission.refund", r"pcr.test", r"covid.*test",
+    r"confidenti", _W + r"rh" + _E, r"ressources.humaines",
+]
+
+
+def doc_location(msg):
+    """File name + folder path of a server document (from its 'Document: ...' header line)."""
+    first = (msg.get("body") or "").split("\n", 1)[0]
+    path = first[len("Document:"):].strip() if first.startswith("Document:") else ""
+    return f"{msg.get('subject') or ''} | {path}"
+
+
 def load_messages(run_dir):
     with open(run_dir / "acquisition.json", encoding="utf-8-sig") as f:
         data = json.load(f)
@@ -300,6 +325,10 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="only process the first N new emails")
     ap.add_argument("--documents", action="store_true",
                     help="server documents only, into server.db (default: emails only, into proparco.db)")
+    ap.add_argument("--exclude", action="append", default=[],
+                    help="documents: also leave out files whose name or folder matches this (repeatable)")
+    ap.add_argument("--no-default-exclusions", action="store_true",
+                    help="documents: do not apply the built-in sensitive-document list")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -331,6 +360,23 @@ def main():
     # documents read several times (changed files): only the newest version counts.
     # Runs are in date order, so the last occurrence of a document is the newest one.
     newest_doc = {m["entry_id"]: m["fingerprint"] for m in all_msgs if m.get("kind") == "document"}
+    # Sensitive server documents (passports, CVs, payslips, travel/expense papers, confidential...)
+    # stay in the extracted text on this laptop but are never made searchable.
+    excluded = []
+    if args.documents:
+        patterns = ([] if args.no_default_exclusions else SENSITIVE_DOCS) + \
+            list(cfg.get("index_exclude", [])) + [re.escape(x) for x in args.exclude]
+        rx = re.compile("|".join(f"(?:{p})" for p in patterns), re.I) if patterns else None
+        if rx:
+            keep = []
+            for m in all_msgs:
+                where = doc_location(m)
+                hit = rx.search(where)
+                if hit:
+                    excluded.append((hit.group(0), where))
+                else:
+                    keep.append(m)
+            all_msgs = keep
     for msg in all_msgs:
         if True:
             stats["total"] += 1
@@ -380,10 +426,20 @@ def main():
 
     print(f"Run folders:              {len(runs)}")
     noun = "documents" if args.documents else "emails"
-    print(f"{noun.capitalize() + ' found:':<26}{stats['total']}")
+    n_excluded = len({w for _, w in excluded}) if args.documents else 0
+    print(f"{noun.capitalize() + ' found:':<26}{stats['total'] + n_excluded}")
     print(f"  already in database:    {stats['stored']}")
     print(f"  duplicates in source:   {stats['duplicate']}")
     print(f"  empty after cleaning:   {stats['empty']}")
+    if args.documents:
+        print(f"  left out as sensitive:  {len(set(w for _, w in excluded))}"
+              + ("  (list: logs/index-excluded.txt)" if excluded else ""))
+        if excluded:
+            out = cfg["_data_dir"] / "logs" / "index-excluded.txt"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("Server documents NOT made searchable (matched term | file | folder):\n" +
+                           "\n".join(f"{t:<18} | {w}" for t, w in sorted(set(excluded), key=lambda x: x[1])),
+                           encoding="utf-8")
     print(f"  to process now:         {len(todo)}")
     print(f"Text removed by cleaning: {saved:.0f}%  "
           f"({stats['chars_in']:,} -> {stats['chars_out']:,} characters)")
