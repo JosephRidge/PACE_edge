@@ -49,6 +49,11 @@ def read_db(path):
     return db
 
 
+MAX_EMAILS_PER_THREAD = 5   # newest emails shown per thread (the agent summary covers them all)
+MAX_OPEN_THREADS = 5        # newest threads shown open per deal; older ones folded
+EMAIL_TEXT_CHARS = 3000     # email text kept on the page (the full text stays in the database)
+
+
 def email_threads(db_path):
     """conversation_id -> thread info incl. the latest generated fields."""
     if not Path(db_path).exists():
@@ -113,6 +118,17 @@ def fields_from_state(state):
     return {"latest_deal_summary": G.render_summary(state.get("summary")),
             "project_history": "\n".join(state.get("history", [])),
             "next_steps": G.render_steps(state.get("steps", []))}
+
+
+def page_emails(emails):
+    """The newest MAX_EMAILS_PER_THREAD emails of a thread, newest first, text capped."""
+    newest = sorted(emails, key=lambda e: e.get("date") or "", reverse=True)[:MAX_EMAILS_PER_THREAD]
+    return {"olderEmails": max(0, len(emails) - len(newest)),
+            "emails": [{"date": e["date"], "from": e["from"], "to": e["to"][:6], "subject": e["subject"],
+                        "body": (e["body"] or "")[:EMAIL_TEXT_CHARS],
+                        "bodyCut": len(e["body"] or "") > EMAIL_TEXT_CHARS,
+                        "flags": e["flags"], "review": e["review"], "attachments": e["attachments"]}
+                       for e in newest]}
 
 
 def server_db(cfg):
@@ -320,7 +336,8 @@ def build(cfg, include_all=False, quiet=False):
         clients = [c for c in p["counterparties"] if c in cps and pid in cps[c]["projects"]] \
             or [c for c in p["counterparties"] if c in cps][:1]
         names = sorted({core_name(p["name"])} | {cps[c]["name"] for c in clients})
-        dts = sorted(deal_threads.get(pid, []), key=lambda x: (not x["best"], x["t"]["last"]), reverse=False)
+        dts = sorted(deal_threads.get(pid, []), key=lambda x: x["t"]["last"], reverse=True)   # newest first
+        dts.sort(key=lambda x: not x["best"])                                                 # best matches first (stable)
         proposal = next((x for x in dts if x["t"]["result"] and x["best"]), None)
         for x in dts:
             x["status"] = thread_status(x["m"]["conversation_id"], x["t"], note, running)
@@ -366,11 +383,7 @@ def build(cfg, include_all=False, quiet=False):
                                    "next": (x["t"]["result"] or {}).get("next_steps") or ""},
                          "review": x["t"]["review"], "status": x["status"],
                          "topId": x["top"]["project_id"], "topName": x["top"]["deal"],
-                         "emails": [{"date": e["date"], "from": e["from"], "to": e["to"][:6],
-                                     "subject": e["subject"], "body": e["body"][:6000],
-                                     "flags": e["flags"], "review": e["review"],
-                                     "attachments": e["attachments"]}
-                                    for e in ((x["full"] or {}).get("emails") or x["t"]["emails"])]}
+                         **page_emails((x["full"] or {}).get("emails") or x["t"]["emails"])}
                         for x in dts],
             "docs": related_documents(cfg, sdb, names) if (dts or len(order) <= 150) else [],
             "hasEmails": any(x["best"] for x in dts),
@@ -381,7 +394,7 @@ def build(cfg, include_all=False, quiet=False):
               "senders": t["senders"][:3], "unknown": m.get("unknown_addresses", [])[:4]}
              for m, t in sorted(unmatched, key=lambda mt: mt[1]["last"], reverse=True)]
 
-    page = PAGE.replace("__DATA__", json.dumps({"deals": items, "loose": loose}, ensure_ascii=False)
+    page = PAGE.replace("__DATA__", json.dumps({"deals": items, "loose": loose, "maxOpen": MAX_OPEN_THREADS}, ensure_ascii=False)
                         .replace("</", "<\\/"))
     page = page.replace("__BUILT__", esc(f"Built {datetime.now():%d/%m/%Y %H:%M} · Notion synced "
                                          f"{d.get('synced_at', '?')[:16].replace('T', ' ')} · "
@@ -429,6 +442,23 @@ th{font-size:13px;color:var(--muted);font-weight:600;width:16%}td{width:42%}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 13px;margin:8px 0}
 .none{color:var(--muted);font-style:italic}.why{font-size:13px;color:var(--muted)}
 .wrap{overflow-x:auto}.att{margin:6px 0;padding-left:18px}summary{cursor:pointer;color:var(--accent)}
+.dealhead{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}
+.notion-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:9px;
+border:1px solid var(--accent);color:var(--accent);text-decoration:none;font-weight:600;font-size:14px;white-space:nowrap}
+.notion-btn:hover{background:var(--accent);color:var(--panel)}
+.facts{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0 6px}
+.fact{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:7px 12px;min-width:120px}
+.fact .k{display:block;font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:2px}
+.fact .v{font-size:14.5px;font-weight:600}
+.fact.stage{border-left:5px solid var(--stc,var(--line))}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.02em}
+.unset{color:var(--muted);font-style:italic;font-weight:400}
+.pill{display:inline-block;font-size:13px;font-weight:600;padding:1px 10px;border-radius:999px;background:var(--chip);margin:1px 5px 1px 0}
+.cps{margin:8px 0 2px}.cps .k{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-right:6px}
+.stage-early{--stc:#d98a00}.stage-loi{--stc:#2f6fd6}.stage-formal{--stc:#0f8a9c}.stage-signed{--stc:#1f9a5a}
+.stage-lead{--stc:#8a5ad6}.stage-inactive{--stc:#9aa8af}
+@media (prefers-color-scheme:dark){.stage-early{--stc:#f0b35a}.stage-loi{--stc:#7fa8ff}.stage-formal{--stc:#6cc3d6}
+.stage-signed{--stc:#6fd29c}.stage-lead{--stc:#b99cff}}
 </style></head><body>
 <header><h1>Deals: emails and documents</h1>
 <input type="search" id="q" placeholder="Search deals, counterparties, contacts">
@@ -478,6 +508,17 @@ function attList(a) {
     ? `<li><a href="${esc(x.href)}" target="_blank" rel="noopener">${esc(x.name)}</a>${x.sizeMB ? ` <span class="meta">${x.sizeMB} MB</span>` : ''}</li>`
     : `<li>${esc(x.name)} <span class="meta">(${esc(x.reason || 'not saved')})</span></li>`).join('') + '</ul>';
 }
+function stageClass(status) {
+  const s = (status || '').toLowerCase();
+  if (s.includes('non active')) return 'stage-inactive';
+  if (s.includes('signed') && !s.includes('loi')) return 'stage-signed';
+  if (s.includes('formalisation') || s.includes('authori')) return 'stage-formal';
+  if (s.includes('loi') || s.includes('instruction') || s.includes('post cid')) return 'stage-loi';
+  if (s.includes('early') || s.includes('pipe') || s.includes('pre cid')) return 'stage-early';
+  if (s.includes('lead') || s.includes('target')) return 'stage-lead';
+  return '';
+}
+const pills = xs => xs.map(x => `<span class="pill">${esc(x)}</span>`).join('');
 function threadCard(t) {
   if (!t.best) {      // alternative match: the thread belongs more likely to another deal
     return `<div class="card"><strong>${esc(t.subject)}</strong>
@@ -490,17 +531,18 @@ function threadCard(t) {
     <span class="meta">${esc(t.last)} · ${t.count} email(s)${nAtt ? ` · ${nAtt} attachment(s)` : ''} · match ${t.score.toFixed(1)}${t.best ? '' : ' (alternative)'}</span>
     <div class="why">Why this deal: ${esc(t.evidence.join('; '))}</div>
     ${t.status && t.status.state !== 'done' ? `<div style="margin-top:6px">${statusHtml(t.status)}</div>` : ''}
-    ${has ? `<details style="margin-top:8px"><summary>Show this thread's agent summary</summary>
-      <table style="margin-top:6px"><tr><th>Latest deal</th><td colspan="2">${para(t.agent.latest)}</td></tr>
-      <tr><th>History</th><td colspan="2">${para(t.agent.history)}</td></tr>
-      <tr><th>Next steps</th><td colspan="2">${para(t.agent.next)}</td></tr></table></details>` : ''}
-    ${t.review ? '<span class="badge rev">needs review</span>' : ''}
-    ${t.emails.length ? `<details style="margin-top:8px"><summary>Show the ${t.emails.length} email(s) and attachments</summary>
+    ${has ? `<h4 style="margin:10px 0 4px">Agent summary</h4>
+      <table><tr><th>Latest deal</th><td>${para(t.agent.latest)}</td></tr>
+      <tr><th>History</th><td>${para(t.agent.history)}</td></tr>
+      <tr><th>Next steps</th><td>${para(t.agent.next)}</td></tr></table>` : ''}
+    ${t.review ? '<div class="why" style="color:var(--warn)">Check before using: some names or numbers in this summary could not be matched word for word to the email (details under each email).</div>' : ''}
+    ${t.emails.length ? `<details style="margin-top:8px"><summary>Show the ${t.olderEmails ? 'latest ' : ''}${t.emails.length} email(s) and attachments</summary>
       ${t.emails.map(e => `<div class="card"><strong>${esc(e.date)}</strong> · ${esc(e.subject)}
         <div class="why">From ${esc(e.from)}${e.to.length ? ' to ' + esc(e.to.join(', ')) : ''}</div>
         ${attList(e.attachments)}
         ${e.flags.length ? `<div class="why" style="color:var(--warn)">${e.flags.map(esc).join('<br>')}</div>` : ''}
-        <details><summary>Email text</summary><div style="white-space:pre-wrap">${esc(e.body)}</div></details></div>`).join('')}
+        <details><summary>Email text</summary><div style="white-space:pre-wrap">${esc(e.body)}${e.bodyCut ? '\n… (shortened here; the full text is in the database and search)' : ''}</div></details></div>`).join('')}
+      ${t.olderEmails ? `<p class="meta">${t.olderEmails} older email(s) in this thread not shown here (they are in the agent summary, the database and search).</p>` : ''}
       </details>` : ''}</div>`;
 }
 function show(id) {
@@ -516,35 +558,43 @@ function show(id) {
   if (!d) return;
   const p = d.proposal;
   const st = d.agent || {state: 'none'};
-  const holder = !p ? `<td rowspan="3">${statusHtml(st)}</td>` : '';
-  const agentCell = key => {
-    if (!p) return '';
-    if (p.kind === 'deal' && key === 'latest' && !p.changed) return '<span class="none">No change proposed</span>';
-    if (p.kind === 'deal' && key === 'history') return p.history ? '<em>To add:</em><br>' + para(p.history) : '<span class="none">No new entries</span>';
-    return para(p[key]);
-  };
-  const row = (label, key, first) => `<tr><th>${label}</th><td>${para(d.notion[key])}</td>${p ? `<td>${agentCell(key)}</td>` : (first ? holder : '')}</tr>`;
-  $('detail').innerHTML = `<h2>${esc(d.name)}</h2>
-    <p class="meta"><span class="badge">Project ID: ${esc(d.projectId || 'not set in Notion')}</span>
-    ${esc(d.status || 'no status')}${d.team.length ? ' · ' + esc(d.team.join(', ')) : ''}${d.countries.length ? ' · ' + esc(d.countries.join(', ')) : ''}
-    ${d.url ? ` · <a href="${esc(d.url)}" target="_blank" rel="noopener">Open in Notion</a>` : ''}</p>
-    ${d.counterparties.length ? `<p class="meta">Counterparties: ${esc(d.counterparties.join(' · '))}</p>` : ''}
-    <h3>On Notion vs agent summary</h3>
-    <div class="wrap"><table><tr><th></th><th>On Notion (now)</th><th>Agent summary</th></tr>
-    ${row('Latest deal description', 'latest', true)}${row('History of discussions', 'history')}${row('Next steps', 'next')}</table></div>
-    ${p && st.state !== 'done' ? `<div style="margin-top:8px">${statusHtml(st)}</div>` : ''}
-    ${p && p.kind === 'deal' ? `<p class="meta">Deal summary (${esc(p.created)}) built from: the Notion record · ${p.emails} email evidence line(s)${p.documents.length ? ' · documents: ' + p.documents.map(x => esc(x.file)).join(', ') : ''}</p>`
-      : p ? `<p class="meta">Sources: ${esc(p.from)}${d.docs.some(x => x.kind === 'about this deal') ? ' · server documents about this deal' : ''}</p>` : ''}
-    ${p && p.kind === 'deal' && p.flags && p.flags.length ? `<p class="meta" style="color:var(--warn)">To check before using: ${p.flags.map(esc).join(' · ')}</p>`
-      : p && p.review ? '<p class="meta" style="color:var(--warn)">Some facts in the agent summary could not be verified against its sources: check before using.</p>' : ''}
+  const dealCard = (p && p.kind === 'deal') ? `<div class="card"><strong>Agent summary for the deal</strong>
+      <span class="meta">${esc(p.created)} · from the Notion record, ${p.emails} email evidence line(s)${p.documents.length ? ' and documents: ' + p.documents.map(x => esc(x.file)).join(', ') : ''}</span>
+      <table style="margin-top:6px"><tr><th>Latest deal</th><td>${para(p.latest)}</td></tr>
+      <tr><th>History to add</th><td>${p.history ? para(p.history) : '<span class="none">No new entries</span>'}</td></tr>
+      <tr><th>Next steps</th><td>${para(p.next)}</td></tr></table>
+      ${p.flags && p.flags.length ? `<div class="why" style="color:var(--warn)">To check before using: ${p.flags.map(esc).join(' · ')}</div>` : ''}</div>` : '';
+  $('detail').innerHTML = `<div class="dealhead"><h2>${esc(d.name)}</h2>
+      ${d.url ? `<a class="notion-btn" href="${esc(d.url)}" target="_blank" rel="noopener">Open in Notion &#8599;</a>` : ''}</div>
+    <div class="facts">
+      <div class="fact"><span class="k">Project ID</span><span class="v ${d.projectId ? 'mono' : 'unset'}">${esc(d.projectId || 'not set in Notion')}</span></div>
+      <div class="fact stage ${stageClass(d.status)}"><span class="k">Status</span><span class="v ${d.status ? '' : 'unset'}">${esc(d.status || 'not set')}</span></div>
+      <div class="fact"><span class="k">Sector</span><span class="v">${d.team.length ? pills(d.team) : '<span class="unset">not set</span>'}</span></div>
+      <div class="fact"><span class="k">Location${d.countries.length > 1 ? 's' : ''}</span><span class="v">${d.countries.length ? pills(d.countries) : '<span class="unset">not set</span>'}</span></div>
+    </div>
+    ${d.counterparties.length ? `<div class="cps"><span class="k">Counterparties</span>${pills(d.counterparties)}</div>` : ''}
     <p class="meta">Read-only view: nothing has been sent to Notion. Updating Notion will happen only after approval.</p>
-    <h3>Email threads (${d.threads.length})</h3>
-    ${d.threads.map(t => threadCard(t)).join('') || '<p class="none">No email threads matched.</p>'}
-    <h3>Server documents (${d.docs.length})</h3>
-    ${d.docs.map(x => `<div class="card"><strong>${esc(x.name)}</strong> <span class="meta">${esc(x.date)} · ${esc(x.kind)}${x.also.length ? ' · also as ' + esc(x.also.join(', ')) : ''}</span>
+    ${st.state === 'running' ? `<div style="margin-top:8px">${statusHtml(st)}</div>` : ''}
+    ${(() => {
+      const best = d.threads.filter(t => t.best), alt = d.threads.filter(t => !t.best);
+      const open = best.slice(0, DATA.maxOpen || 5), older = best.slice(DATA.maxOpen || 5);
+      let h = `<h3>Email threads (${best.length})</h3>` + (open.map(threadCard).join('') || '<p class="none">No email threads matched.</p>');
+      if (older.length) h += `<details style="margin-top:6px"><summary>${older.length} older thread(s)</summary>` +
+        older.map(t => `<div class="card"><strong>${esc(t.subject)}</strong> <span class="meta">${esc(t.last)} · ${t.count} email(s)</span><div class="why">Why this deal: ${esc(t.evidence.join('; '))}</div></div>`).join('') + '</details>';
+      if (alt.length) h += `<p class="meta">Also possibly related: ${alt.length} thread(s), more likely about ` +
+        [...new Map(alt.map(t => [t.topId, t])).values()].map(t => `<a href="#${encodeURIComponent(t.topId)}" onclick="show('${esc(t.topId)}');return false">${esc(t.topName)}</a>`).join(', ') + '.</p>';
+      return h;
+    })()}
+    <h3>Server documents (${d.docs.filter(x => x.kind === 'about this deal').length})</h3>
+    ${(() => {
+      const card = x => `<div class="card"><strong>${esc(x.name)}</strong> <span class="meta">${esc(x.date)} · ${esc(x.kind)}${x.also.length ? ' · also as ' + esc(x.also.join(', ')) : ''}</span>
       ${x.link ? ` · <a href="${esc(x.link)}" target="_blank" rel="noopener">open on the server</a>` : ''}
       ${x.path ? `<div class="why" title="Copy into File Explorer if the link does not open">${esc(x.path)}</div>` : ''}
-      <div class="why">${esc(x.excerpt)}${x.excerpt.length >= 300 ? '…' : ''}</div></div>`).join('') || '<p class="none">No indexed server documents mention this deal yet.</p>'}
+      <div class="why">${esc(x.excerpt)}${x.excerpt.length >= 300 ? '…' : ''}</div></div>`;
+      const own = d.docs.filter(x => x.kind === 'about this deal'), other = d.docs.filter(x => x.kind !== 'about this deal');
+      return (own.map(card).join('') || '<p class="none">No indexed server documents filed under this deal yet.</p>') +
+        (other.length ? `<details style="margin-top:6px"><summary>${other.length} other document(s) that only mention it (reports, newsletters)</summary>${other.map(card).join('')}</details>` : '');
+    })()}
     <h3>Contacts (${d.contacts.length})</h3>
     ${d.contacts.map(c => `<div class="meta">${esc(c.name)}${c.job ? ' · ' + esc(c.job) : ''} · ${esc(c.email)}</div>`).join('') || '<p class="none">None in Notion.</p>'}`;
   $('detail').scrollTop = 0;
