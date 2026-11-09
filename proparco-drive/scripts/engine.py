@@ -344,14 +344,35 @@ class Engines:
         return False
 
     def embed(self, texts, return_usage=False):
-        """Return one vector per text, in the same order (and token usage if asked)."""
-        resp = self.emb.post("/v1/embeddings", {"input": list(texts)}, timeout=300)
-        data = resp["data"]
-        vectors = [_clean_vector(d["embedding"]) for d in sorted(data, key=lambda d: d["index"])]
+        """Return one vector per text, in the same order (and token usage if asked).
+
+        Sent in small requests (embedding.request_size, default 8 texts) so each answers in
+        seconds even on a slow laptop. A request that times out is split in half and retried;
+        a single text that still times out raises RuntimeError (the caller shortens it)."""
+        texts = list(texts)
+        size = max(1, int(self.cfg["embedding"].get("request_size", 8)))
+        timeout = float(self.cfg["embedding"].get("request_timeout", 900))
+        vectors, usage = [], {}
+
+        def run(group):
+            try:
+                resp = self.emb.post("/v1/embeddings", {"input": group}, timeout=timeout)
+            except (TimeoutError, OSError) as err:          # socket timeout, reset, refused...
+                if len(group) > 1:
+                    half = len(group) // 2
+                    return run(group[:half]) + run(group[half:])
+                raise RuntimeError(f"embedding request failed: {err.__class__.__name__}") from err
+            for k, v in (resp.get("usage") or {}).items():
+                if isinstance(v, (int, float)):
+                    usage[k] = usage.get(k, 0) + v
+            return [_clean_vector(d["embedding"]) for d in sorted(resp["data"], key=lambda d: d["index"])]
+
+        for start in range(0, len(texts), size):
+            vectors += run(texts[start:start + size])
         want = self.cfg["embedding"]["dimension"]
         if vectors and len(vectors[0]) != want:
             raise RuntimeError(f"Embedding size is {len(vectors[0])}, config expects {want}.")
-        return (vectors, resp.get("usage", {})) if return_usage else vectors
+        return (vectors, usage) if return_usage else vectors
 
     def count_tokens(self, text):
         """Exact token count from the writer model; a cautious estimate if unavailable."""

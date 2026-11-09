@@ -30,6 +30,11 @@ from xml.etree import ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from engine import load_config  # noqa: E402
+import io  # noqa: E402
+from collections import deque  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+DEFAULT_WORKERS = 4        # files fetched from the server at the same time
 
 PDF_MAX_PAGES = 300        # a single huge PDF must not stall the run
 PDF_MAX_SECONDS = 60
@@ -39,8 +44,8 @@ HTML_EXT = {".html", ".htm"}
 OLD_EXT = {".doc", ".xls", ".ppt", ".msg", ".rtf"}
 
 
-def read_text_file(path):
-    raw = path.read_bytes()
+def read_text_file(path, data=None):
+    raw = data if data is not None else path.read_bytes()
     for enc in ("utf-8-sig", "cp1252", "latin-1"):
         try:
             return raw.decode(enc)
@@ -122,7 +127,7 @@ def pdf_text(path):
         from pypdf import PdfReader
     except ImportError:
         return None, "PDF reader (pypdf) not available"
-    reader = PdfReader(str(path))
+    reader = PdfReader(path if isinstance(path, io.BytesIO) else str(path))
     if reader.is_encrypted:
         try:
             if not reader.decrypt(""):          # most "encrypted" PDFs only restrict printing/copying
@@ -153,12 +158,12 @@ SENSITIVE = re.compile(r"(kyc|passport|passeport|pi[eè]ce.d.identit|carte.d.ide
                        r"mot.de.passe|sanction|compliance|conformit)", re.I)
 
 
-def office_properties(path):
+def office_properties(path, data=None):
     """Author, title and dates stored inside Word/Excel/PowerPoint files (docProps/core.xml)."""
     if path.suffix.lower() not in (".docx", ".xlsx", ".pptx"):
         return {}
     try:
-        with zipfile.ZipFile(path) as z:
+        with zipfile.ZipFile(io.BytesIO(data) if data is not None else path) as z:
             if "docProps/core.xml" not in z.namelist():
                 return {}
             xml = z.read("docProps/core.xml").decode("utf-8", errors="replace")
@@ -187,7 +192,7 @@ def share_label(root):
 DENIED = {}      # share -> list of folders the current user may not open
 
 
-def walk(roots, excludes):
+def walk(roots, excludes, top_only=False):
     """All files under the roots: (share, root, path, size, mtime). Folders the user may not
     open are recorded in DENIED (never bypassed): access is decided by the server."""
     for root in roots:
@@ -197,8 +202,9 @@ def walk(roots, excludes):
             if isinstance(err, PermissionError) or getattr(err, "winerror", None) == 5:
                 DENIED.setdefault(label, []).append(str(getattr(err, "filename", "") or err))
         for dirpath, dirnames, filenames in os.walk(root, onerror=note):
-            dirnames[:] = [d for d in dirnames if not d.startswith((".", "~$", "$"))
-                           and not any(x.lower() in d.lower() for x in excludes)]
+            dirnames[:] = [] if top_only else [
+                d for d in dirnames if not d.startswith((".", "~$", "$"))
+                and not any(x.lower() in d.lower() for x in excludes)]
             for name in filenames:
                 if name.startswith(("~$", ".")) or name.lower() in ("thumbs.db", "desktop.ini"):
                     continue
@@ -296,23 +302,25 @@ def inventory(roots, excludes, out_dir, check_access=False):
     print(f"\nFull list: {csv_path}")
 
 
-def extract(path):
-    """(text, skip_reason)"""
+def extract(path, data=None):
+    """(text, skip_reason). With data (the file's bytes, fetched once), nothing more is read
+    from the server: PDF and Office readers would otherwise make many small network reads."""
     ext = path.suffix.lower()
+    src = io.BytesIO(data) if data is not None else path
     try:
         if ext in TEXT_EXT:
-            return read_text_file(path), None
+            return read_text_file(path, data), None
         if ext in HTML_EXT:
-            raw = re.sub(r"(?is)<(script|style).*?</\1>", "", read_text_file(path))
+            raw = re.sub(r"(?is)<(script|style).*?</\1>", "", read_text_file(path, data))
             return html.unescape(re.sub(r"<[^>]+>", " ", raw)), None
         if ext == ".docx":
-            return docx_text(path), None
+            return docx_text(src), None
         if ext == ".xlsx":
-            return xlsx_text(path), None
+            return xlsx_text(src), None
         if ext == ".pptx":
-            return pptx_text(path), None
+            return pptx_text(src), None
         if ext == ".pdf":
-            return pdf_text(path)
+            return pdf_text(src)
         if ext in OLD_EXT:
             return None, f"old format {ext} (save as the newer format to include it)"
         return None, "file type not read"
@@ -322,6 +330,60 @@ def extract(path):
         return None, "no permission to read"
     except OSError as err:
         return None, f"could not read ({err.__class__.__name__})"
+
+
+READ_EXT = TEXT_EXT | HTML_EXT | {".docx", ".xlsx", ".pptx", ".pdf"}
+
+
+def fetch(item, max_bytes):
+    """Run in a worker thread: fetch one file in a single read and extract its text and
+    properties. Returns (text, reason, props). Never raises."""
+    mtime, size, label, root, p, stamp = item
+    if size > max_bytes:
+        return None, None, {}                     # decided by the main loop (size rule)
+    ext = p.suffix.lower()
+    if ext in OLD_EXT or ext not in READ_EXT:
+        text, reason = extract(p)                 # no file access needed for these
+        return text, reason, {}
+    try:
+        data = p.read_bytes()                     # one sequential read over the network
+    except PermissionError:
+        return None, "no permission to read", {}
+    except OSError as err:
+        return None, f"could not read ({err.__class__.__name__})", {}
+    try:
+        text, reason = extract(p, data)
+    except Exception as err:                      # never let one file stop the run
+        if "cryptography" in str(err) or "AES" in str(err):
+            text, reason = None, "encrypted PDF (encryption library missing on this drive)"
+        else:
+            text, reason = None, f"could not read ({err.__class__.__name__})"
+    props = office_properties(p, data) if text else {}
+    return text, reason, props
+
+
+def fetched_in_order(todo, workers, max_bytes):
+    """Yield (item, (text, reason, props)) in the original order while up to `workers` files
+    are fetched at once. Only a small window is read ahead, so memory stays bounded."""
+    if workers <= 1:
+        for item in todo:
+            yield item, fetch(item, max_bytes)
+        return
+    pool = ThreadPoolExecutor(max_workers=workers)
+    window, it = deque(), iter(todo)
+    try:
+        for item in it:
+            window.append((item, pool.submit(fetch, item, max_bytes)))
+            if len(window) >= workers * 2:
+                head, fut = window.popleft()
+                yield head, fut.result()
+        while window:
+            head, fut = window.popleft()
+            yield head, fut.result()
+    finally:
+        for _, fut in window:
+            fut.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def main():
@@ -338,6 +400,10 @@ def main():
                     help="text kept per document (default 300,000 characters)")
     ap.add_argument("--days", type=int, default=0, help="only files changed in the last N days")
     ap.add_argument("--batch", type=int, default=300, help="documents per saved batch")
+    ap.add_argument("--workers", type=int, default=None,
+                    help=f"files fetched at the same time (default {DEFAULT_WORKERS}; 1 = one by one)")
+    ap.add_argument("--no-subfolders", action="store_true",
+                    help="only the files directly inside each --path (used to split a sector between laptops)")
     ap.add_argument("--exclude", action="append", default=[],
                     help="skip paths containing this text (repeatable), e.g. --exclude KYC")
     args = ap.parse_args()
@@ -379,7 +445,7 @@ def main():
     print("Listing files on the server (this can take a few minutes for large folders) ...",
           flush=True)
     todo, listed = [], 0
-    for label, root, p, size, mtime in walk(roots, excludes):
+    for label, root, p, size, mtime in walk(roots, excludes, top_only=args.no_subfolders):
         listed += 1
         if listed % 5000 == 0:
             print(f"  {listed:,} files listed ...", flush=True)
@@ -421,8 +487,13 @@ def main():
                    "scope": ", ".join(map(str, roots)),
                    "acquiredAt": datetime.now(timezone.utc).isoformat(),
                    "messages": [m for m, _ in batch]}
-        (out / "acquisition.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1),
-                                              encoding="utf-8")
+        # Written in one step: a temporary file, renamed when complete, so an interrupted save
+        # never leaves an empty or partial acquisition.json behind.
+        body = json.dumps(payload, ensure_ascii=False, indent=1)
+        body = body.encode("utf-8", "replace").decode("utf-8")
+        tmp = out / "acquisition.json.tmp"
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, out / "acquisition.json")
         (out / "manifest.json").write_text(json.dumps(
             {"acquiredAt": payload["acquiredAt"], "documents": len(batch)}, indent=1),
             encoding="utf-8")
@@ -432,37 +503,39 @@ def main():
         batch = []
 
     try:
-        for i, (mtime, size, label, root, p, stamp) in enumerate(todo, 1):
+        workers = args.workers or int(cfg.get("sdrive_workers", DEFAULT_WORKERS))
+        max_bytes = args.max_mb * 1024 * 1024
+        if workers > 1:
+            print(f"Fetching {workers} files at a time.", flush=True)
+        results = fetched_in_order(todo, workers, max_bytes)
+        for i, ((mtime, size, label, root, p, stamp), (text, reason, fetched_props)) in \
+                enumerate(results, 1):
             rel = p.relative_to(root)
             print(f"  [{i:,}/{len(todo):,}] {p.name[:70]} ({size / 1024 / 1024:.1f} MB)", flush=True)
-            if size > args.max_mb * 1024 * 1024:
+            if size > max_bytes:
                 skipped.append((str(rel), f"larger than {args.max_mb:g} MB"))
                 seen[str(p)] = stamp
                 continue
-            try:
-                text, reason = extract(p)
-            except Exception as err:                 # never let one file stop the run
-                if "cryptography" in str(err) or "AES" in str(err):
-                    text, reason = None, "encrypted PDF (encryption library missing on this drive)"
-                else:
-                    text, reason = None, f"could not read ({err.__class__.__name__})"
             if reason == "no permission to read":
                 DENIED.setdefault(label, []).append(str(p))
             if text is None or not text.strip():
                 skipped.append((str(rel), reason or "no text"))
                 if reason == "no permission to read":   # remembered; retried after retry_days
                     seen[str(p)] = f"denied|{stamp}|{datetime.now().isoformat(timespec='seconds')}"
-                elif reason and reason.startswith("could not read"):
-                    pass                            # e.g. a network drop: try again next run
+                elif reason and (reason.startswith("could not read")
+                                 or "encryption library missing" in reason):
+                    pass                            # network drop, or library not yet installed: retry next run
                 else:
                     seen[str(p)] = stamp
                 continue
+            # Some PDFs yield invalid characters (lone surrogates) that cannot be saved: replace them.
+            text = text.encode("utf-8", "replace").decode("utf-8")
             text = re.sub(r"[ \t]+\n", "\n", text)
             text = re.sub(r"\n{3,}", "\n\n", text).strip()
             note = ""
             if len(text) > args.max_chars:
                 text, note = text[:args.max_chars], " (long document: first part kept)"
-            props = office_properties(p)
+            props = fetched_props
             top = rel.parts[0] if len(rel.parts) > 1 else "(top)"
             header = [f"Document: {label}/{rel}"]
             for k, lbl in (("title", "Title"), ("author", "Author"),
