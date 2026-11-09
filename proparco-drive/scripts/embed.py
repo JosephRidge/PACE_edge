@@ -204,10 +204,20 @@ SENSITIVE_DOCS = [
     _W + r"cv" + _E, r"curriculum", _W + r"resume" + _E, r"shortlist",
     r"payslip", r"bulletin.de.paie", _W + r"salaires?" + _E, _W + r"salary" + _E, _W + r"payroll" + _E,
     r"boarding.?pass", _W + r"e-?ticket" + _E, r"billet.d.avion", r"hotel.(bill|invoice)",
-    _W + r"invoices?" + _E, _W + r"receipts?" + _E, _W + r"factures?" + _E, r"note.de.frais",
-    r"remboursement.frais", r"mission.refund", r"pcr.test", r"covid.*test",
-    r"confidenti", _W + r"rh" + _E, r"ressources.humaines",
+    _W + r"invoices?" + _E, r"receipt[\s_-]*\d", _W + r"factures?" + _E, r"note.de.frais",
+    r"remboursement.frais", r"mission.refund", r"pcr.test", r"covid.{0,30}test",
+    _W + r"rh" + _E, r"ressources.humaines",
+    # personal data of people affected by projects (resettlement annexes)
+    r"list.of.land.?owners", r"liste.des.propri[eé]taires", _W + r"paps?.list" + _E, r"pap.register",
+    r"resettlement.register", r"census.of.affected",
 ]
+
+
+# Documents MARKED confidential (confidentiel, confidential), not documents about confidentiality
+# (confidentialité, confidentiality agreement). Off by default: in deal work nearly everything is
+# stamped confidential, and a sector database stays with the team that already has the folders.
+# Use --exclude-confidential (or "index_exclude_confidential": true) for widely shared databases.
+CONFIDENTIAL_DOCS = [_W + r"confidenti(?:el|elle|al)s?" + _E]
 
 
 def doc_location(msg):
@@ -327,6 +337,8 @@ def main():
                     help="server documents only, into server.db (default: emails only, into proparco.db)")
     ap.add_argument("--exclude", action="append", default=[],
                     help="documents: also leave out files whose name or folder matches this (repeatable)")
+    ap.add_argument("--exclude-confidential", action="store_true",
+                    help="documents: also leave out documents marked confidential (for widely shared databases)")
     ap.add_argument("--no-default-exclusions", action="store_true",
                     help="documents: do not apply the built-in sensitive-document list")
     args = ap.parse_args()
@@ -365,6 +377,7 @@ def main():
     excluded = []
     if args.documents:
         patterns = ([] if args.no_default_exclusions else SENSITIVE_DOCS) + \
+            (CONFIDENTIAL_DOCS if args.exclude_confidential or cfg.get("index_exclude_confidential") else []) + \
             list(cfg.get("index_exclude", [])) + [re.escape(x) for x in args.exclude]
         rx = re.compile("|".join(f"(?:{p})" for p in patterns), re.I) if patterns else None
         if rx:
