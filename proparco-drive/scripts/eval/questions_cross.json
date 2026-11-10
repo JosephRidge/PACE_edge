@@ -1,0 +1,28 @@
+{
+  "about": "Search evaluation for the CROSS sector database. 'expect' = any of these texts in the right document's name or folder (case-insensitive). Empty 'expect' = no answer exists in CROSS (control).",
+  "questions": [
+    {"id": "Q01", "lang": "en>fr", "q": "What operational limits apply to Proparco's lending and investments?", "expect": ["PROR0014", "Limites opérationnelles"]},
+    {"id": "Q02", "lang": "en>fr", "q": "Proparco's credit and investment policy", "expect": ["Politique de crédit"]},
+    {"id": "Q03", "lang": "en>fr", "q": "Checklist for reviewing a non-disclosure agreement", "expect": ["PROU0008a"]},
+    {"id": "Q04", "lang": "en>fr", "q": "Monthly activity report of the Nairobi office for September 2026", "expect": ["2026_09 Nairobi_Reporting"]},
+    {"id": "Q05", "lang": "en>fr", "q": "Country profile of Tanzania", "expect": ["Fiche Pays Tanzanie"]},
+    {"id": "Q06", "lang": "en>fr", "q": "Briefing note prepared before a mission to Ethiopia", "expect": ["BOM Ethiopie"]},
+    {"id": "Q07", "lang": "en", "q": "Withholding tax problem with the Tanzanian authorities", "expect": ["WHT", "Memorandum for authorities_Tanzania"]},
+    {"id": "Q08", "lang": "en", "q": "Long-term strategy of the currency hedging fund TCX", "expect": ["TCX"]},
+    {"id": "Q09", "lang": "en", "q": "How is the guarantee fee calculated under the EU guarantee scheme?", "expect": ["Guarantee Fee", "RET -", "EFSD"]},
+    {"id": "Q10", "lang": "en>fr", "q": "Risk department opinion on the I&M Bank Rwanda financing", "expect": ["IM Bank Rwanda", "I&M Rwanda"]},
+    {"id": "Q11", "lang": "en", "q": "Talking points for a meeting with TotalEnergies", "expect": ["EDL TOTAL ENERGIES"]},
+    {"id": "Q12", "lang": "en", "q": "Debrief of the June 2025 country mission on Kenya's economy", "expect": ["mission pays Kenya debrief"]},
+    {"id": "Q13", "lang": "en", "q": "How the AFD group works together in Kenya on infrastructure", "expect": ["Group approach Kenya"]},
+    {"id": "Q14", "lang": "en", "q": "Roadshow presentation of the Choose Africa initiative", "expect": ["Choose Africa"]},
+    {"id": "Q15", "lang": "en", "q": "Guarantee facility for the creative and cultural industries", "expect": ["CREA Fund"]},
+    {"id": "Q16", "lang": "en", "q": "Sustainability performance report of ARIA", "expect": ["ARIA"]},
+    {"id": "Q17", "lang": "en", "q": "Presentation of Proparco's activities in East Africa", "expect": ["Proparco in East Africa"]},
+    {"id": "Q18", "lang": "fr", "q": "Quelle est l'activité de Proparco au Kenya ?", "expect": ["Proparco au Kenya", "Fiche Pays Kenya"]},
+    {"id": "Q19", "lang": "fr", "q": "À quelles conférences la direction régionale participe-t-elle ?", "expect": ["Conferences Table_DRAE"]},
+    {"id": "Q20", "lang": "en>fr", "q": "Questions and answers about ex-ante project rating", "expect": ["cotation ex ante"]},
+    {"id": "Q21", "lang": "en>fr", "q": "Template for the project identification form", "expect": ["PROM0001a"]},
+    {"id": "N01", "lang": "en", "q": "Recipe for a chocolate birthday cake", "expect": []},
+    {"id": "N02", "lang": "en", "q": "Football match results of the English Premier League", "expect": []}
+  ]
+}
