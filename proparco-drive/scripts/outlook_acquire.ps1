@@ -58,6 +58,17 @@ $PR_ATTACH_CONTENT_ID   = "http://schemas.microsoft.com/mapi/proptag/0x3712001F"
 
 function P([scriptblock]$get) { try { return (& $get) } catch { return $null } }
 
+# Outlook collections are read one entry at a time: enumerating a whole collection fails as soon as
+# ONE entry is unreadable (a disconnected shared mailbox, a missing .pst, a damaged item), and that
+# would silently drop everything after it. Unreadable entries are named in the summary instead.
+function Get-N($coll) {
+    if ($null -eq $coll) { return 0 }
+    if ($coll -is [array]) { return $coll.Count }
+    try { return [int]$coll.Count } catch { return 0 }
+}
+function Get-At($coll, [int]$i) { if ($coll -is [array]) { return ,$coll[$i - 1] }; return ,$coll.Item($i) }
+$script:unreadable = New-Object System.Collections.ArrayList
+
 $script:smtpCache = @{}
 function Get-Smtp($entry) {
     # An address entry -> its SMTP address, also for internal Exchange users. Cached: resolving an
@@ -245,9 +256,14 @@ function Export-Folder($folder, [string]$label, [string]$path) {
         try { $items.Sort($field, $true) } catch {}
         $since = (Get-Date).AddDays(-$DaysBack)
     }
-    $i = 0; $t0 = Get-Date
-    foreach ($m in $items) {
-        $i++
+    $t0 = Get-Date
+    for ($i = 1; $i -le $row.items; $i++) {
+        $m = $null
+        try { $m = Get-At $items $i } catch {
+            $row.failed++
+            [void]$script:failures.Add("$path`titem $i of $($row.items) could not be opened: $($_.Exception.Message)`t")
+            continue
+        }
         if ($i % 250 -eq 0 -and $row.items -gt 0) {
             $rate = $i / [math]::Max(1, ((Get-Date) - $t0).TotalSeconds)
             Write-Host ("    {0}: {1:N0}/{2:N0} ({3:N1} items/s, ~{4:N0} min left in this folder)" -f `
@@ -288,10 +304,17 @@ function Get-Targets($ns) {
     $targets = @()
     $roots = @()
     if ($Stores.Count) {
-        foreach ($st in @($ns.Stores)) {
-            if ($Stores -contains [string](P { $st.DisplayName })) { $roots += ,(P { $st.GetRootFolder() }) }
+        $all = @(); $sc = $null; try { $sc = $ns.Stores } catch {}; $n = Get-N $sc     # direct: a function return would enumerate it
+        for ($k = 1; $k -le $n; $k++) {
+            try { $all += ,(Get-At $sc $k) } catch { [void]$script:unreadable.Add("mailbox/data file #$k in Outlook's list: $($_.Exception.Message)") }
         }
-        $missing = @($Stores | Where-Object { $n = $_; -not (@($ns.Stores) | Where-Object { (P { $_.DisplayName }) -eq $n }) })
+        foreach ($st in $all) {
+            if ($Stores -contains [string](P { $st.DisplayName })) {
+                $root = P { $st.GetRootFolder() }
+                if ($root) { $roots += ,$root } else { [void]$script:unreadable.Add("$(P { $st.DisplayName }): its folders could not be opened") }
+            }
+        }
+        $missing = @($Stores | Where-Object { $nm = $_; -not ($all | Where-Object { (P { $_.DisplayName }) -eq $nm }) })
         if ($missing) { Write-Host "Not found in Outlook (not exported): $($missing -join ', ')" }
     } else {
         $explorer = P { $outlook.ActiveExplorer() }
@@ -308,7 +331,13 @@ function Get-Targets($ns) {
             $label = $(if ($sentId -and (P { $f.EntryID }) -eq $sentId) { "SentMail" } else { "Inbox" })
             if ($isMail) { $targets += ,@($f, $label, $path) }
             elseif ($Complete) { $script:nonMail += ,@($path, [int](P { $f.Items.Count })) }
-            if ($IncludeSubfolders) { try { foreach ($s in $f.Folders) { $walk.Push(@($s, "$path\$(P { $s.Name })")) } } catch {} }
+            if ($IncludeSubfolders) {
+                $subs = $null; try { $subs = $f.Folders } catch {}; $nsub = Get-N $subs     # direct, never through P
+                for ($k = 1; $k -le $nsub; $k++) {
+                    try { $s = Get-At $subs $k; $walk.Push(@($s, "$path\$(P { $s.Name })")) }
+                    catch { [void]$script:unreadable.Add("$path (subfolder $k of $nsub): $($_.Exception.Message)") }
+                }
+            }
         }
         if (-not $IncludeSubfolders) {
             $sent = P { $cur.Store.GetDefaultFolder(5) }
@@ -340,7 +369,7 @@ function Invoke-Export {
                 throw "No emails are selected in Outlook. Select them first, then run again."
             }
             $script:searched = @("Selection in Outlook")
-            $sel = [pscustomobject]@{ Items = @($explorer.Selection) }
+            $sel = [pscustomobject]@{ Items = $explorer.Selection }
             $rows += Export-Folder $sel "Selection" "Selection in Outlook"
         } else {
             $targets = Get-Targets $ns
@@ -364,9 +393,9 @@ function Invoke-Export {
     $stamp = $started.ToString("yyyyMMdd-HHmm")
     $csv = Join-Path $LogDir "mail-folders-$stamp.csv"
     $rows | ForEach-Object { [pscustomobject]$_ } | Export-Csv -Path $csv -NoTypeInformation -Encoding UTF8
-    if ($script:failures.Count) {
+    if ($script:failures.Count -or $script:unreadable.Count) {
         [System.IO.File]::WriteAllText((Join-Path $LogDir "mail-failed-$stamp.txt"),
-            "folder`treason`tsubject`r`n" + ($script:failures -join "`r`n"), $utf8)
+            "folder`treason`tsubject`r`n" + (@($script:failures) + @($script:unreadable | ForEach-Object { "(not readable)`t$_`t" }) -join "`r`n"), $utf8)
     }
     $sum = @{ items = 0; exported = 0; already = 0; older = 0; failed = 0; cap = 0 }
     foreach ($r in $rows) {
@@ -384,10 +413,16 @@ function Invoke-Export {
             (($script:nonMail | ForEach-Object { "$($_[0]) ($($_[1]))" }) -join "; "))
     }
     if ($script:AttFailed) { Write-Host "Attachments that could not be saved: $($script:AttFailed) (listed in each item's record)." }
+    if ($script:unreadable.Count) {
+        Write-Host "COULD NOT BE READ by Outlook (not exported):"
+        $script:unreadable | ForEach-Object { Write-Host "  - $_" }
+    }
     if ($script:noBody) { Write-Host "Items exported with no readable body (often encrypted or rights-protected): $($script:noBody)." }
     if ($script:retried) { Write-Host "Items that needed a second try: $($script:retried)." }
     if ($stopped) {
         Write-Host "STOPPED: $stopped. Everything saved so far is kept; free some space and run again to continue."
+    } elseif ($script:unreadable.Count) {
+        Write-Host "ACCOUNTED FOR WITH EXCEPTIONS: $($script:unreadable.Count) mailbox(es)/folder(s) could not be read (listed above), $($sum.failed) item(s) failed."
     } elseif ($accounted -ne $sum.items) {
         Write-Host ("CHECK: Outlook reported {0:N0} items but {1:N0} were accounted for (items may have arrived or moved during the export). Run again to pick up any missing." -f $sum.items, $accounted)
     } elseif ($sum.failed -eq 0 -and $sum.older -eq 0 -and $sum.cap -eq 0) {

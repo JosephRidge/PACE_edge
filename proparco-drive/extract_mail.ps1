@@ -31,17 +31,33 @@ try {
 # ---------------------------------------------------------------- what is open in Outlook
 try {
     $ol = New-Object -ComObject Outlook.Application
-    $stores = @($ol.GetNamespace("MAPI").Stores | ForEach-Object {
-        $type = $(try { [int]$_.ExchangeStoreType } catch { 3 })
-        [pscustomobject]@{ Name = [string]$_.DisplayName; Public = ($type -eq 2)
-                           Kind = $(switch ($type) { 0 { "mailbox" } 1 { "other person's mailbox" } 2 { "public folders" }
-                                                     3 { "data file (.pst)" } default { "archive / additional mailbox" } }) } })
+    # one entry at a time: a single unreadable entry (disconnected shared mailbox, missing .pst)
+    # must not hide all the others
+    $coll = $ol.GetNamespace("MAPI").Stores
+    $count = 0; try { $count = [int]$coll.Count } catch {}
+    $stores = @(); $bad = @()
+    for ($k = 1; $k -le $count; $k++) {
+        try {
+            $st = $coll.Item($k)
+            $name = [string]$st.DisplayName
+            $type = $(try { [int]$st.ExchangeStoreType } catch { 3 })
+            $stores += [pscustomobject]@{ Name = $name; Public = ($type -eq 2)
+                Kind = $(switch ($type) { 0 { "mailbox" } 1 { "other person's mailbox" } 2 { "public folders" }
+                                          3 { "data file (.pst)" } default { "archive / additional mailbox" } }) }
+        } catch { $bad += "entry $k of ${count}: $($_.Exception.Message)" }
+    }
+    if (-not $stores.Count) { throw "Outlook listed no readable mailbox ($count entries; $($bad -join '; '))" }
 } catch {
     Write-Host "`nCould not talk to Outlook: $($_.Exception.Message)"
     Write-Host "Open classic Outlook (not the new Outlook), then run this again."
     [void][Win32.Power]::SetThreadExecutionState([uint32]"0x80000000"); exit 1
 }
 Write-Host "`nOpen in Outlook:"
+if ($bad) {
+    Write-Host "  Outlook could not read $($bad.Count) entr$(if ($bad.Count -eq 1) { 'y' } else { 'ies' }) of its list (often a disconnected shared mailbox or a"
+    Write-Host "  .pst that has moved). Check that every mailbox and archive she uses appears below:"
+    $bad | ForEach-Object { Write-Host "    - $_" }
+}
 for ($i = 0; $i -lt $stores.Count; $i++) {
     Write-Host ("  {0}. {1}   ({2}){3}" -f ($i + 1), $stores[$i].Name, $stores[$i].Kind, $(if ($stores[$i].Public) { "  - not exported unless chosen" } else { "" }))
 }
