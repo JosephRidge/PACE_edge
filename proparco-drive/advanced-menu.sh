@@ -1,0 +1,4 @@
+#!/bin/sh
+# Full menu for testers and builders (clients use start.sh).
+cd "$(dirname "$0")" || exit 1
+exec sh start.sh menu.py --menu

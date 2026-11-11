@@ -72,7 +72,7 @@ def attachment_index(data_dir, run_folders):
 def collect(cfg):
     path = cfg["_data_dir"] / "db" / "proparco.db"
     if not path.exists():
-        sys.exit(f"No database at {path}. Run embed.py first.")
+        return []
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
     tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -124,6 +124,19 @@ def collect(cfg):
                 last = results[m["entry_id"]]
                 break
         state = states.get(conv)
+        cur = None
+        if last is not None:
+            cur = {k: last[k] for k in ("latest_deal_summary", "next_steps", "project_history")
+                   if k in last.keys()}
+            if state is not None and "state_json" in state.keys():
+                try:                     # works with generate.py versions that store changes only
+                    import generate as G
+                    st = json.loads(state["state_json"])
+                    cur = {"latest_deal_summary": G.render_summary(st.get("summary")),
+                           "next_steps": G.render_steps(st.get("steps", [])),
+                           "project_history": "\n".join(st.get("history", []))}
+                except Exception:
+                    pass
         out.append({
             "id": conv,
             "title": clean_title(items[0]["subject"]),
@@ -135,9 +148,9 @@ def collect(cfg):
             "needsReview": sum(1 for e in emails if e["review"] == "needs_review"),
             "attachments": sum(len(e["attachments"]) for e in emails),
             "people": sorted(people.values(), key=lambda p: (-p["sent"], -p["received"])),
-            "summary": last["latest_deal_summary"] if last is not None else None,
-            "steps": last["next_steps"] if last is not None else None,
-            "history": last["project_history"] if last is not None else None,
+            "summary": cur["latest_deal_summary"] if cur else None,
+            "steps": cur["next_steps"] if cur else None,
+            "history": cur["project_history"] if cur else None,
             "emails": emails,
         })
     out.sort(key=lambda t: t["last"], reverse=True)
@@ -198,12 +211,13 @@ a { color: var(--ink); }
 @media (max-width: 760px) { .layout { grid-template-columns: 1fr; }
   nav { max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--rule); } }
 </style></head><body>
-<header><h1>Email threads</h1>
+<header><h1>Emails and server documents</h1>
 <input type="search" id="q" placeholder="Search titles, people, summaries" aria-label="Search">
 <label><input type="checkbox" id="fGen"> generated</label>
 <label><input type="checkbox" id="fDeal"> deal related</label>
 <label><input type="checkbox" id="fRev"> needs review</label>
 <label><input type="checkbox" id="fAtt"> with attachments</label>
+<label><input type="checkbox" id="fDocs"> server documents</label>
 <span class="note" id="count"></span>
 <span class="note">Built __BUILT__ · local only, rebuild for new results</span></header>
 <div class="layout"><nav id="list" aria-label="Threads"></nav><main id="detail"></main></div>
@@ -220,6 +234,7 @@ function matches(t) {
   if ($('fDeal').checked && !t.deal) return false;
   if ($('fRev').checked && !t.needsReview) return false;
   if ($('fAtt').checked && !t.attachments) return false;
+  if ($('fDocs').checked && t.kind !== 'documents') return false;
   if (!q) return true;
   const hay = [t.title, t.summary, t.steps, t.history, ...t.people.map(p => p.label),
                ...t.emails.map(e => e.subject)].join(' ').toLowerCase();
@@ -228,10 +243,10 @@ function matches(t) {
 
 function renderList() {
   const shown = threads.filter(matches);
-  $('count').textContent = `${shown.length} of ${threads.length} threads`;
+  $('count').textContent = `${shown.length} of ${threads.length} items`;
   $('list').innerHTML = shown.map(t => `<button data-id="${esc(t.id)}" aria-current="${t.id === current}">
     <div class="t">${esc(t.title)}</div>
-    <div class="m">${esc(t.last)} · ${t.count} email${t.count > 1 ? 's' : ''}${t.attachments ? ' · ' + t.attachments + ' attachment' + (t.attachments > 1 ? 's' : '') : ''}
+    <div class="m">${esc(t.last)} · ${t.count} ${t.kind === 'documents' ? 'document' : 'email'}${t.count > 1 ? 's' : ''}${t.kind === 'documents' ? ' <span class="badge">server</span>' : ''}${t.attachments ? ' · ' + t.attachments + ' attachment' + (t.attachments > 1 ? 's' : '') : ''}
     ${t.needsReview ? '<span class="badge warn">review</span>' : ''}${t.deal ? '<span class="badge ok">deal</span>' : ''}</div></button>`).join('');
   $('list').querySelectorAll('button').forEach(b => b.onclick = () => show(b.dataset.id));
   if (!current && shown.length) show(shown[0].id);
@@ -242,10 +257,25 @@ function field(text, none) {
               : `<p class="empty">${none}</p>`;
 }
 
+function showDocuments(t) {
+  const docs = t.emails.map(e => `<details class="email"><summary>
+      <strong>${esc(e.date)}</strong> · ${esc(e.subject)}
+      <div class="meta">${esc(e.from)}</div></summary>
+      <div class="body">
+      ${e.attachments.map(a => `<p><a href="${a.href}" target="_blank" rel="noopener">${esc(a.name)}</a></p>`).join('')}
+      <pre>${esc(e.body)}</pre></div></details>`).join('');
+  $('detail').innerHTML = `<h2>${esc(t.title)}</h2>
+    <p class="meta">Server folder · ${t.count} documents indexed${t.shown < t.count ? ` (newest ${t.shown} listed; search finds all)` : ''} · ${esc(t.first)} to ${esc(t.last)}</p>
+    <p class="meta">Read-only copy of the text; the originals stay on the server.</p>
+    <h3>Documents</h3>${docs}`;
+}
+
 function show(id) {
   current = id;
   const t = threads.find(x => x.id === id);
   $('list').querySelectorAll('button').forEach(b => b.setAttribute('aria-current', b.dataset.id === id));
+  if (t.kind === 'documents') { showDocuments(t); $('detail').scrollTop = 0;
+    history.replaceState(null, '', '#' + encodeURIComponent(id)); return; }
   const people = t.people.map(p => `<span class="${p.internal ? 'int' : 'ext'}">${esc(p.label)}
       <span class="meta">(${p.sent} sent, ${p.received} received${p.internal ? ', internal' : ''})</span></span>`).join('');
   const notGen = t.generated ? '' : '<p class="empty">Fields not generated yet for this thread (menu: Generate summaries for ONE thread).</p>';
@@ -274,7 +304,7 @@ function show(id) {
   history.replaceState(null, '', '#' + encodeURIComponent(id));
 }
 
-['q', 'fGen', 'fDeal', 'fRev', 'fAtt'].forEach(i => $(i).addEventListener('input', renderList));
+['q', 'fGen', 'fDeal', 'fRev', 'fAtt', 'fDocs'].forEach(i => $(i).addEventListener('input', renderList));
 const fromHash = decodeURIComponent(location.hash.slice(1));
 if (fromHash && threads.some(t => t.id === fromHash)) current = fromHash;
 renderList();
@@ -282,16 +312,81 @@ if (current) show(current);
 </script></body></html>"""
 
 
+DOC_EXCERPT = 600          # characters shown per document (the full text stays in the database)
+DOCS_PER_FOLDER = 400      # newest documents listed per folder; search finds the rest
+
+
+def server_db_path(cfg):
+    published = cfg.get("server_db_path")
+    if published and Path(published).exists():
+        return Path(published)
+    local = cfg["_data_dir"] / "db" / "server.db"
+    return local if local.exists() else None
+
+
+def collect_documents(cfg):
+    """Server documents (server.db), grouped by folder, opened read-only."""
+    path = server_db_path(cfg)
+    if path is None:
+        return []
+    try:
+        db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        db = sqlite3.connect(str(path))
+    db.row_factory = sqlite3.Row
+    base = Path(cfg.get("sdrive_link_base", "S:\\"))
+    folders = {}
+    for r in db.execute("""SELECT conversation_id, subject, sender, received_iso, body_clean
+                           FROM messages ORDER BY received_iso DESC"""):
+        folders.setdefault(r["conversation_id"], []).append(r)
+    out = []
+    for conv, rows in folders.items():
+        docs = []
+        for r in rows[:DOCS_PER_FOLDER]:
+            body = r["body_clean"] or ""
+            first = body.split("\n", 1)[0]
+            rel = first[len("Document: "):] if first.startswith("Document: ") else ""
+            text = body.split("\n\n", 1)[1] if "\n\n" in body else body
+            parts = [x for x in re.split(r"[\\\\/]", rel) if x]
+            link = base.joinpath(*parts).as_uri() if parts and base.is_absolute() else None
+            docs.append({
+                "date": (r["received_iso"] or "")[:10],
+                "from": r["sender"] or "",
+                "to": [],
+                "subject": r["subject"] or "",
+                "body": text[:DOC_EXCERPT] + ("..." if len(text) > DOC_EXCERPT else ""),
+                "review": None, "flags": [],
+                "attachments": [{"name": "Open the original on the server", "href": link}] if link else [],
+            })
+        out.append({
+            "id": conv, "kind": "documents",
+            "title": conv.replace("folder:", ""),
+            "first": (rows[-1]["received_iso"] or "")[:10], "last": (rows[0]["received_iso"] or "")[:10],
+            "count": len(rows), "shown": len(docs), "generated": 0, "deal": None,
+            "needsReview": 0, "attachments": 0, "people": [],
+            "summary": None, "steps": None, "history": None, "emails": docs,
+        })
+    db.close()
+    out.sort(key=lambda t: t["last"], reverse=True)
+    return out
+
+
+def build(cfg):
+    """Write <data_dir>/viewer.html; returns (path, threads)."""
+    threads = collect(cfg) + collect_documents(cfg)
+    data = json.dumps(threads, ensure_ascii=False).replace("</", "<\\/")
+    page = PAGE.replace("__DATA__", data).replace("__BUILT__", datetime.now().strftime("%d/%m/%Y %H:%M"))
+    out = cfg["_data_dir"] / "viewer.html"
+    out.write_text(page, encoding="utf-8")
+    return out, threads
+
+
 def main():
     ap = argparse.ArgumentParser(description="Build an offline page to browse the email threads.")
     ap.add_argument("--no-open", action="store_true", help="build the page without opening it")
     args = ap.parse_args()
     cfg = load_config()
-    threads = collect(cfg)
-    data = json.dumps(threads, ensure_ascii=False).replace("</", "<\\/")
-    page = PAGE.replace("__DATA__", data).replace("__BUILT__", datetime.now().strftime("%d/%m/%Y %H:%M"))
-    out = cfg["_data_dir"] / "viewer.html"
-    out.write_text(page, encoding="utf-8")
+    out, threads = build(cfg)
     generated = sum(1 for t in threads if t["generated"])
     print(f"Viewer written: {out}")
     print(f"{len(threads)} threads, {generated} with generated fields, "
