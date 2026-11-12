@@ -7,7 +7,7 @@
   "start_mode": "menu",
   "auto_source": "outlook",
   "auto_first_fetch_days": 30,
-     "server_db_path": "C:\\server-agent\\db\\server.db",
+  "server_db_path": "C:\\server-agent\\db\\server.db",
   "internal_domains": [
     "proparco.fr",
     "afd.fr"
@@ -39,9 +39,10 @@
     "startup_timeout": 120,
     "extra_args": [
       "-b",
-      "1024",
+      "2048",
       "-ub",
-      "1024"
+      "2048"
     ]
-  }
+  },
+  "server_db_dir": "/home/josephridge/proparco-work/sectors"
 }

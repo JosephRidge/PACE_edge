@@ -12,12 +12,48 @@ Output stays in this terminal; nothing is sent anywhere.
 """
 import argparse
 import sqlite3
+import re
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from engine import Engines, load_config  # noqa: E402
+
+
+HEADER = ("Document:", "Title:", "Author:", "Last edited by:", "Created:")
+
+
+def snippet(text):
+    """Chunk text for display: without the document header lines, on one line."""
+    lines = text.split("\n")
+    while lines and (lines[0].startswith(HEADER) or not lines[0].strip()):
+        lines.pop(0)
+    return " ".join(" ".join(lines).split()).replace("\\", "/")
+
+
+def dedupe(rows, k):
+    """One entry per document and passage: the PDF and Word versions of the same file
+    (same folder and name) are shown once, noting the other formats."""
+    out, seen = [], {}
+    for r in rows:
+        name = r["subject"] or ""
+        stem, _, ext = name.rpartition(".")
+        key_doc = (r["conversation_id"], (stem or name).lower())
+        plain = re.sub(r"\[(Page|Slide|Sheet) [^\]]*\]", " ", snippet(r["text"]))
+        key_text = " ".join(plain.split())[:120].lower()
+        prev = seen.get((key_doc, key_text))
+        if prev is not None:
+            if ext and ext.lower() not in prev["also"] and not name.lower().endswith(prev["ext"]):
+                prev["also"].append(ext.lower())
+            continue
+        item = dict(r)
+        item["also"], item["ext"] = [], "." + ext.lower() if ext else ""
+        seen[(key_doc, key_text)] = item
+        out.append(item)
+        if len(out) == k:
+            break
+    return out
 
 
 def main():
@@ -31,13 +67,9 @@ def main():
     import sqlite_vec
     # Emails: proparco.db on the drive. Documents: the published server copy if reachable,
     # otherwise the local build (server.db on the drive).
+    from sources import server_databases
     sources = [("emails", cfg["_data_dir"] / "db" / "proparco.db")]
-    published = cfg.get("server_db_path")
-    local_docs = cfg["_data_dir"] / "db" / "server.db"
-    if published and Path(published).exists():
-        sources.append(("documents", Path(published)))
-    elif local_docs.exists():
-        sources.append(("documents", local_docs))
+    sources += [(f"documents ({label})", path) for label, path in server_databases(cfg)]
     sources = [(k, p) for k, p in sources if p.exists()]
     if not sources:
         sys.exit("No database yet. Run embed.py (emails) or embed.py --documents (server files).")
@@ -58,7 +90,8 @@ def main():
     print(f"\nQuery embedded in {time.time() - t0:.1f}s\n")
 
     for kind, path in sources:
-        db = connect(path, read_only=(kind == "documents"))
+        is_docs = kind.startswith("documents")
+        db = connect(path, read_only=is_docs)
         if not args.summaries:
             rows = db.execute("""
                 SELECT v.distance, c.text, m.subject, m.sender, m.received_iso, m.conversation_id
@@ -66,17 +99,19 @@ def main():
                 JOIN chunks c   ON c.id = v.rowid
                 JOIN messages m ON m.entry_id = c.entry_id
                 WHERE v.embedding MATCH ? AND k = ?
-                ORDER BY v.distance""", (q, args.k)).fetchall()
-            label = "document" if kind == "documents" else "email"
+                ORDER BY v.distance""", (q, args.k * 4)).fetchall()
+            rows = dedupe(rows, args.k) if is_docs else rows[:args.k]
+            label = kind[:-1] if kind == "emails" else kind
             print(f"\n=== Top {len(rows)} {label} chunks from {path.name} "
                   f"(similarity: 1.00 = identical meaning) ===")
             for r in rows:
-                where = (r["conversation_id"].replace("folder:", "folder ")[:40] if kind == "documents"
+                where = (r["conversation_id"].replace("folder:", "folder ")[:40] if is_docs
                          else f"thread {r['conversation_id'][:12]}")
                 print(f"\n[{(1 - r['distance']) if r['distance'] is not None else 0:.2f}] {(r['received_iso'] or '')[:10]} | "
                       f"{r['subject']} | {where}")
-                print("    " + r["text"][:300].replace("\n", " ").replace("\\", "/")
-                      + ("..." if len(r["text"]) > 300 else ""))
+                text = snippet(r["text"])
+                also = f"  (same document also as {', '.join(r['also'])})" if r.get("also") else ""
+                print("    " + text[:300] + ("..." if len(text) > 300 else "") + also)
         if kind == "emails":
             has_summaries = db.execute(
                 "SELECT name FROM sqlite_master WHERE name = 'thread_summaries'").fetchone()

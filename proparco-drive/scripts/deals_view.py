@@ -196,6 +196,21 @@ def related_documents(cfg, db, names):
     return found[:DOCS_PER_DEAL]
 
 
+def all_related_documents(cfg, sdbs, names):
+    """related_documents() over every sector database, merged: the deal's own documents first,
+    newest first, each tagged with its sector."""
+    found = []
+    for label, con in sdbs:
+        try:
+            for item in related_documents(cfg, con, names):
+                item["sector"] = label
+                found.append(item)
+        except sqlite3.Error:
+            continue
+    found.sort(key=lambda x: (x["rank"], -int(x["date"].replace("-", "") or 0)))
+    return found[:DOCS_PER_DEAL]
+
+
 def core_name(deal_name):
     """'Family Bank - Equity 2026' -> 'Family Bank' (the part naming the company)."""
     return re.split(r"\s+[-–]\s+", deal_name or "", maxsplit=1)[0].strip()
@@ -215,7 +230,15 @@ def deal_proposal(r):
         src = json.loads(r.get("sources_json") or "{}")
     except ValueError:
         src = {}
-    return {"kind": "deal", "latest": r.get("proposed_latest") or "",
+    latest, base = r.get("proposed_latest") or "", (r.get("notion_latest") or "").strip()
+    added = latest[len(base):].strip() if base and latest.startswith(base) else ("" if latest == base else latest)
+    return {"kind": "deal", "latest": latest, "added": added if r.get("description_changed") else "",
+            "method": "retrieval (emails and documents searched directly)"
+                      if (r.get("prompt_version") or "").endswith("retrieve") else "thread summaries",
+            "excerpts": src.get("email_excerpts", []),
+            "notAdded": src.get("not_added", []),
+            "found": {"history": src.get("history_added"), "steps": src.get("steps_added"),
+                      "done": src.get("steps_done")},
             "changed": bool(r.get("description_changed")),
             "history": r.get("history_append") or "", "next": r.get("proposed_next") or "",
             "from": "deal summary", "review": 1 if r.get("review_status") == "needs_review" else 0,
@@ -317,8 +340,13 @@ def build(cfg, include_all=False, quiet=False):
     except sqlite3.Error:
         pass
     any_running = False
-    sdb_path = server_db(cfg)
-    sdb = read_db(sdb_path) if sdb_path else None
+    from sources import server_databases
+    sdbs = []                                            # every sector database on this laptop
+    for label, path in server_databases(cfg):
+        try:
+            sdbs.append((label, read_db(path)))
+        except sqlite3.Error:
+            continue
 
     with_emails = [pid for pid in projects if any(x["best"] for x in deal_threads.get(pid, []))]
     live = [pid for pid, p in projects.items()
@@ -341,6 +369,8 @@ def build(cfg, include_all=False, quiet=False):
         proposal = next((x for x in dts if x["t"]["result"] and x["best"]), None)
         for x in dts:
             x["status"] = thread_status(x["m"]["conversation_id"], x["t"], note, running)
+            if pid in deal_props and x["status"]["state"] == "not_run":
+                x["status"] = {"state": "deal", "label": "Covered by the deal summary above"}
         best = [x for x in dts if x["best"]]
         states = [x["status"]["state"] for x in best]
         if dts and not best:
@@ -383,13 +413,20 @@ def build(cfg, include_all=False, quiet=False):
                                    "next": (x["t"]["result"] or {}).get("next_steps") or ""},
                          "review": x["t"]["review"], "status": x["status"],
                          "topId": x["top"]["project_id"], "topName": x["top"]["deal"],
+                         "sharedWith": [c["deal"] for c in x["m"]["candidates"]
+                                        if c["score"] >= x["m"]["candidates"][0]["score"] and c["project_id"] != pid],
                          **page_emails((x["full"] or {}).get("emails") or x["t"]["emails"])}
                         for x in dts],
-            "docs": related_documents(cfg, sdb, names) if (dts or len(order) <= 150) else [],
+            "docs": all_related_documents(cfg, sdbs, names) if (dts or len(order) <= 150) else [],
             "hasEmails": any(x["best"] for x in dts),
+            "hasSummary": pid in deal_props,
+            "summaryChanged": bool(pid in deal_props and (deal_props[pid].get("description_changed")
+                                   or (deal_props[pid].get("history_append") or "").strip()
+                                   or "— awaiting" in (deal_props[pid].get("proposed_next") or "")
+                                   or json.loads(deal_props[pid].get("sources_json") or "{}").get("steps_added"))),
         })
-    if sdb:
-        sdb.close()
+    for _, con in sdbs:
+        con.close()
     loose = [{"subject": t["subject"], "last": t["last"][:10], "count": t["count"],
               "senders": t["senders"][:3], "unknown": m.get("unknown_addresses", [])[:4]}
              for m, t in sorted(unmatched, key=lambda mt: mt[1]["last"], reverse=True)]
@@ -462,7 +499,8 @@ border:1px solid var(--accent);color:var(--accent);text-decoration:none;font-wei
 </style></head><body>
 <header><h1>Deals: emails and documents</h1>
 <input type="search" id="q" placeholder="Search deals, counterparties, contacts">
-<label><input type="checkbox" id="fMail" checked autocomplete="off"> with emails only</label>
+<label>Show <select id="fShow" autocomplete="off"><option value="summary">deals with an agent summary</option>
+<option value="mail">deals with emails</option><option value="all">all deals</option></select></label>
 <span class="meta" id="count"></span><div class="built">__BUILT__</div></header>
 <main><nav id="list"></nav><section id="detail"></section></main>
 <script>
@@ -473,7 +511,9 @@ const para = s => (s && s.trim()) ? esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1
 let current = null;
 function items() {
   const q = $('q').value.toLowerCase().trim();
-  const list = DATA.deals.filter(d => !$('fMail').checked || d.hasEmails);
+  const mode = $('fShow').value;
+  const list = DATA.deals.filter(d => mode === 'all' || (mode === 'mail' ? d.hasEmails : d.hasSummary))
+    .sort((a, b) => (b.hasSummary - a.hasSummary) || (b.summaryChanged - a.summaryChanged));
   if (!q) return list;
   return list.filter(d => [d.name, d.status, ...d.counterparties, ...d.contacts.map(c => c.name + ' ' + c.email),
      ...d.threads.map(t => t.subject)].join(' ').toLowerCase().includes(q));
@@ -498,6 +538,7 @@ function statusHtml(st) {
   if (st.state === 'partial') return `<span class="badge rev"${tip}>Agent summary incomplete</span><div class="why">Generation was interrupted before the end.</div>`;
   if (st.state === 'not_run') return `<span class="badge"${tip}>Agent summary not generated yet</span>`;
   if (st.state === 'none') return '<span class="none">No email threads for this deal yet.</span>';
+  if (st.state === 'deal') return '<span class="badge">Covered by the deal summary above</span>';
   if (st.state === 'alternative') return `<span class="badge">No agent summary for this deal</span>
     <div class="why">Its only email thread is more likely about <a href="#${encodeURIComponent(st.otherId)}" onclick="show('${esc(st.otherId)}');return false">${esc(st.other)}</a>.</div>`;
   return '';
@@ -530,6 +571,7 @@ function threadCard(t) {
   return `<div class="card"><strong>${esc(t.subject)}</strong>
     <span class="meta">${esc(t.last)} · ${t.count} email(s)${nAtt ? ` · ${nAtt} attachment(s)` : ''} · match ${t.score.toFixed(1)}${t.best ? '' : ' (alternative)'}</span>
     <div class="why">Why this deal: ${esc(t.evidence.join('; '))}</div>
+    ${t.sharedWith && t.sharedWith.length ? `<div class="why">Matched equally to ${t.sharedWith.length} other deal(s): ${esc(t.sharedWith.slice(0, 4).join(', '))}${t.sharedWith.length > 4 ? '…' : ''}</div>` : ''}
     ${t.status && t.status.state !== 'done' ? `<div style="margin-top:6px">${statusHtml(t.status)}</div>` : ''}
     ${has ? `<h4 style="margin:10px 0 4px">Agent summary</h4>
       <table><tr><th>Latest deal</th><td>${para(t.agent.latest)}</td></tr>
@@ -559,11 +601,28 @@ function show(id) {
   const p = d.proposal;
   const st = d.agent || {state: 'none'};
   const dealCard = (p && p.kind === 'deal') ? `<div class="card"><strong>Agent summary for the deal</strong>
-      <span class="meta">${esc(p.created)} · from the Notion record, ${p.emails} email evidence line(s)${p.documents.length ? ' and documents: ' + p.documents.map(x => esc(x.file)).join(', ') : ''}</span>
+      ${p.review ? ' <span class="badge rev">needs review</span>' : ' <span class="badge">proposal, not yet approved</span>'}
+      <span class="meta"> ${esc(p.created)} · method: ${esc(p.method || '')} · ${p.emails} email excerpt(s)${p.documents.length ? ' and documents: ' + p.documents.map(x => esc(x.label + ' ' + x.file)).join(', ') : ''}</span>
+      ${(() => {
+        const f = p.found || {}, n = (p.excerpts || []).length, parts = [];
+        if (p.added) parts.push('a new fact for the description');
+        if (f.history) parts.push(`${f.history} history entr${f.history > 1 ? 'ies' : 'y'}`);
+        if (f.steps) parts.push(`${f.steps} new next step${f.steps > 1 ? 's' : ''}`);
+        if (f.done) parts.push(`${f.done} Notion step${f.done > 1 ? 's' : ''} marked done`);
+        return `<div class="why" style="margin-top:6px"><b>What the agent found:</b> ` +
+          (parts.length ? parts.join(', ') + '.' : `nothing new beyond Notion's record`) +
+          ` It read ${n || p.emails} email excerpt(s)${p.documents.length ? ' and ' + p.documents.length + ' document passage(s)' : ''}` +
+          `${(p.notAdded || []).length ? `, and left out ${p.notAdded.length} item(s) it could not verify` : ''}.</div>` +
+          (p.added ? `<div class="why"><b>New since Notion:</b> ${esc(p.added)}</div>` : '');
+      })()}
       <table style="margin-top:6px"><tr><th>Latest deal</th><td>${para(p.latest)}</td></tr>
       <tr><th>History to add</th><td>${p.history ? para(p.history) : '<span class="none">No new entries</span>'}</td></tr>
       <tr><th>Next steps</th><td>${para(p.next)}</td></tr></table>
-      ${p.flags && p.flags.length ? `<div class="why" style="color:var(--warn)">To check before using: ${p.flags.map(esc).join(' · ')}</div>` : ''}</div>` : '';
+      ${p.flags && p.flags.length ? `<div class="why" style="color:var(--warn)">To check before using: ${p.flags.map(esc).join(' · ')}</div>` : ''}
+      ${p.notAdded && p.notAdded.length ? `<details style="margin-top:6px"><summary>Not added: ${p.notAdded.length} item(s) the agent could not verify in the emails</summary>
+        <table>${p.notAdded.map(x => `<tr><th>${esc(x.kind)}</th><td>${esc(x.text)}<div class="why">${esc(x.reason)}</div></td></tr>`).join('')}</table></details>` : ''}
+      ${p.excerpts && p.excerpts.length ? `<details style="margin-top:6px"><summary>Sources: the ${p.excerpts.length} email excerpt(s) the labels refer to</summary>
+        <table>${p.excerpts.map(e => `<tr><th>${esc(e.label)}</th><td>${esc(e.date)} · ${esc(e.from)} · ${esc(e.subject)}</td></tr>`).join('')}</table></details>` : ''}</div>` : '';
   $('detail').innerHTML = `<div class="dealhead"><h2>${esc(d.name)}</h2>
       ${d.url ? `<a class="notion-btn" href="${esc(d.url)}" target="_blank" rel="noopener">Open in Notion &#8599;</a>` : ''}</div>
     <div class="facts">
@@ -574,6 +633,7 @@ function show(id) {
     </div>
     ${d.counterparties.length ? `<div class="cps"><span class="k">Counterparties</span>${pills(d.counterparties)}</div>` : ''}
     <p class="meta">Read-only view: nothing has been sent to Notion. Updating Notion will happen only after approval.</p>
+    ${dealCard}
     ${st.state === 'running' ? `<div style="margin-top:8px">${statusHtml(st)}</div>` : ''}
     ${(() => {
       const best = d.threads.filter(t => t.best), alt = d.threads.filter(t => !t.best);
@@ -600,10 +660,10 @@ function show(id) {
   $('detail').scrollTop = 0;
   history.replaceState(null, '', '#' + encodeURIComponent(id));
 }
-$('fMail').checked = true; $('q').value = '';
+$('fShow').value = DATA.deals.some(d => d.hasSummary) ? 'summary' : 'mail'; $('q').value = '';
 const wanted = decodeURIComponent(location.hash.slice(1));
 if (wanted && (wanted === '__loose' || DATA.deals.some(d => d.id === wanted))) current = wanted;
-['q', 'fMail'].forEach(id => $(id).addEventListener('input', () => { current = null; renderList(); }));
+['q', 'fShow'].forEach(id => ['input', 'change'].forEach(ev => $(id).addEventListener(ev, () => { current = null; renderList(); })));
 renderList();
 </script></body></html>"""
 

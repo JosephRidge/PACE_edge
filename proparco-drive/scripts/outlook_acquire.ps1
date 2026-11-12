@@ -46,6 +46,10 @@ param(
 $ErrorActionPreference = "Stop"
 if ($StoreList) { $Stores = @($StoreList -split '\|' | Where-Object { $_ }) }
 if ($Complete) { $DaysBack = 0; $MaxMessages = 0; $MaxAttachmentMB = 0; $IncludeSubfolders = $true }
+# A selection is exported exactly as selected, every time: no date limit, cap or size limit, every
+# item type, and no resume memory (the one-click summary needs a fresh export of what she picked;
+# the indexer already ignores emails it has seen before).
+if ($Selected) { $DaysBack = 0; $MaxMessages = 0; $MaxAttachmentMB = 0 }
 $PR_SMTP_ADDRESS        = "http://schemas.microsoft.com/mapi/proptag/0x39FE001F"
 $PR_SENDER_SMTP_ADDRESS = "http://schemas.microsoft.com/mapi/proptag/0x5D01001F"
 $FolderIds = @{ Inbox = 6; SentMail = 5 }      # olFolderInbox, olFolderSentMail
@@ -191,7 +195,7 @@ function Convert-Item($m, [string]$folderName, [string]$folderPath) {
 
 $utf8 = New-Object System.Text.UTF8Encoding $false
 $started = Get-Date
-$runId = "OUTLOOK-" + $started.ToString("yyyy-MM-dd_HH-mm-ss")
+$script:runId = "OUTLOOK-" + $started.ToString("yyyy-MM-dd_HH-mm-ss")
 $LogDir = Join-Path (Split-Path $OutRoot -Parent) "logs"
 $IdsFile = Join-Path $OutRoot "exported-ids.txt"
 $script:messages = New-Object System.Collections.ArrayList
@@ -202,7 +206,7 @@ $script:searched = @()
 
 function New-Part {
     $script:partNo++
-    $script:RunDir = Join-Path $OutRoot ("{0}-{1:D3}" -f $runId, $script:partNo)
+    $script:RunDir = Join-Path $OutRoot ("{0}-{1:D3}" -f $script:runId, $script:partNo)
     $script:AttDir = Join-Path $script:RunDir "attachments"
     New-Item -ItemType Directory -Force $script:AttDir | Out-Null
 }
@@ -228,7 +232,7 @@ function Save-Part {
     [System.IO.File]::WriteAllText($tmp, ($acq | ConvertTo-Json -Depth 8), $utf8)
     Move-Item -Force $tmp (Join-Path $script:RunDir "acquisition.json")
     $ids = foreach ($x in $script:messages) { $x.entryId; if ($x.messageId) { "mid:" + $x.messageId } }
-    [System.IO.File]::AppendAllText($IdsFile, (($ids | Where-Object { $_ }) -join "`r`n") + "`r`n", $utf8)
+    if (-not $Selected) { [System.IO.File]::AppendAllText($IdsFile, (($ids | Where-Object { $_ }) -join "`r`n") + "`r`n", $utf8) }
     $script:attSaved += $saved
     Write-Host ("  part {0} saved: {1} items ({2:N0} so far)" -f $script:partNo, $script:messages.Count, $script:total)
     $script:messages.Clear()
@@ -270,7 +274,7 @@ function Export-Folder($folder, [string]$label, [string]$path) {
                 $path, $i, $row.items, $rate, (($row.items - $i) / [math]::Max($rate, 0.01) / 60))
         }
         if ($MaxMessages -gt 0 -and $script:total -ge $MaxMessages) { $row.notExportedCap = $row.items - $i + 1; break }
-        if (-not $Complete -and (P { $m.Class }) -ne $olMail) { $row.failed++; [void]$script:failures.Add("$path`tnot an email (type $(P { $m.MessageClass }))`t$(P { $m.Subject })"); continue }
+        if (-not $Complete -and -not $Selected -and (P { $m.Class }) -ne $olMail) { $row.failed++; [void]$script:failures.Add("$path`tnot an email (type $(P { $m.MessageClass }))`t$(P { $m.Subject })"); continue }
         if ($DaysBack -gt 0) {
             $when = $(if ($label -eq "SentMail") { P { $m.SentOn } } else { P { $m.ReceivedTime } })
             if ($when -and ([datetime]$when) -lt $since) { $row.olderThanLimit = $row.items - $i + 1; break }
@@ -353,9 +357,15 @@ function Get-Targets($ns) {
 
 function Invoke-Export {
     New-Item -ItemType Directory -Force $OutRoot, $LogDir | Out-Null
-    if (Test-Path $IdsFile) {
+    if (-not $Selected -and (Test-Path $IdsFile)) {
         foreach ($l in [System.IO.File]::ReadAllLines($IdsFile)) { if ($l) { $script:exported[$l] = $true } }
         $n = @($script:exported.Keys | Where-Object { -not $_.StartsWith("mid:") }).Count; if ($n) { Write-Host "Resuming: $n items already exported earlier are not exported again." }
+    }
+    # never reuse an existing export folder (two runs in the same second would overwrite each other,
+    # and the one-click summary recognises new work by a new folder)
+    while (Test-Path (Join-Path $OutRoot ("{0}-001" -f $script:runId))) {
+        Start-Sleep -Milliseconds 1100
+        $script:runId = "OUTLOOK-" + (Get-Date).ToString("yyyy-MM-dd_HH-mm-ss")
     }
     New-Part
     if (-not $script:outlook) { $script:outlook = New-Object -ComObject Outlook.Application }
@@ -433,7 +443,7 @@ function Invoke-Export {
     Write-Host "Per-folder counts: $csv"
     Write-Host ""
     Write-Host "$($script:total) messages in $($script:threads.Count) threads, $($script:attSaved) attachments saved, $($sum.failed) skipped."
-    Write-Host "Written to $OutRoot ($($script:partNo) part folder(s) named $runId-NNN)"
+    Write-Host "Written to $OutRoot ($($script:partNo) part folder(s) named $($script:runId)-NNN)"
     Write-Host "Next: run 'Embed new emails' from the menu (or embed.py --dry-run)."
 }
 

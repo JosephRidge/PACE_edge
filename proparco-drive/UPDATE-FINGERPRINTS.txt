@@ -1,0 +1,7 @@
+dd202270eb01  scripts/sources.py
+f4fa166a8e45  scripts/chat.py
+5504b1de458b  scripts/deal_summarize.py
+54a703df9cbe  scripts/deals_view.py
+6ed328617816  scripts/search.py
+e4038479d9c5  scripts/outlook_acquire.ps1
+c44b05f6b99c  extract_mail.ps1

@@ -989,7 +989,8 @@ def main():
                               "\n".join(f"{x['action']} {x['party']}" for x in state["steps"]))
                 started = time.time()
                 try:
-                    with ob.stage("generate_call", thread=obs.short_id(conv_id), call=bi):
+                    with ob.stage("generate_call", thread=obs.short_id(conv_id), call=bi), \
+                            obs.Heartbeat(f"call {bi}: model reading and writing"):
                         text, timings = eng.chat(
                             [{"role": "system", "content": SYSTEM_PROMPT},
                              {"role": "user", "content": prompt}],

@@ -1,4 +1,4 @@
- #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 publish.py - put the server vector database (server.db) on the shared server folder, safely.
 

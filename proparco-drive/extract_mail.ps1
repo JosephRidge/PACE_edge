@@ -5,12 +5,18 @@
 # whatever its size. Ends with a per-folder check against Outlook's own counts
 # ("ALL ITEMS ACCOUNTED FOR"). Interrupted? Run again: nothing already exported is exported twice,
 # also when the same email sits in the mailbox and in an archive. No indexing yet.
+#
+# Several laptops, one flash disk: each Windows user's export goes to its own folder,
+# proparco-data\mailboxes\<user>\ (emails, "already exported" list and logs), so mailboxes are
+# never mixed and one person's emails are never skipped because of another's.
 
 Set-Location $PSScriptRoot
+$who = ($env:USERNAME -replace '[\\/:*?"<>|]', '_')
 $data = Join-Path (Split-Path $PSScriptRoot -Parent) "proparco-data"
-$out = Join-Path $data "acquisitions"
-New-Item -ItemType Directory -Force $out, (Join-Path $data "logs") | Out-Null
-$log = Join-Path $data ("logs\mail-export-{0:yyyyMMdd-HHmm}.log" -f (Get-Date))
+$box = Join-Path $data "mailboxes\$who"                  # one folder per person: never mixed
+$out = Join-Path $box "acquisitions"
+New-Item -ItemType Directory -Force $out, (Join-Path $box "logs") | Out-Null
+$log = Join-Path $box ("logs\mail-export-{0:yyyyMMdd-HHmm}.log" -f (Get-Date))
 
 Add-Type -Namespace Win32 -Name Power -MemberDefinition @'
 [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint esFlags);
@@ -21,6 +27,13 @@ Write-Host ""
 Write-Host "================================================================"
 Write-Host "  Export my emails (read-only): the mailbox and every archive"
 Write-Host "================================================================"
+Write-Host "`nMailbox of Windows user: $who  (on $env:COMPUTERNAME)"
+Write-Host "Saved to: $box"
+if ($box.Substring(0, 2) -ieq $env:SystemDrive) {
+    Write-Host "NOTE: this saves on THIS LAPTOP's own disk, not on the flash disk. To save on the flash disk," -ForegroundColor Yellow
+    Write-Host "      close this window and start EXTRACT MY EMAILS.bat from the flash disk instead." -ForegroundColor Yellow
+}
+if (Test-Path (Join-Path $out "exported-ids.txt")) { Write-Host "An earlier export of this mailbox exists here: it will CONTINUE (nothing is exported twice)." }
 Write-Host "`nKeep classic Outlook open. If Outlook asks to allow access, click Allow."
 Write-Host "Archives kept as .pst files must be open in Outlook first (File > Open & Export > Open Outlook Data File)."
 try {
@@ -82,10 +95,12 @@ $check = ($text -split "`n" | Where-Object { $_ -match "^(ALL ITEMS ACCOUNTED FO
 [void][Win32.Power]::SetThreadExecutionState([uint32]"0x80000000")
 Write-Host "`n================================================================"
 Write-Host "  Email export summary"
+Write-Host "  Mailbox of: $who  (on $env:COMPUTERNAME)"
 Write-Host "  Exported from: $($names -join ' | ')"
 if ($line) { Write-Host "  $($line.Trim())" } else { Write-Host "  The export did not complete: see the log." }
 if ($check) { Write-Host "  $($check.Trim())" }
-Write-Host "  Saved on this flash disk: $out"
+Write-Host "  Saved in: $box"
+Write-Host "  Next laptop: plug in this flash disk and run EXTRACT MY EMAILS.bat there; its user gets its own folder."
 Write-Host "  Log: $log"
 Write-Host "================================================================"
 Add-Content -Path $log -Value ("SUMMARY`nExported from: $($names -join ' | ')`n$line`n$check") -Encoding UTF8

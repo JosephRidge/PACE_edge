@@ -60,28 +60,7 @@ def open_ro(path):
     return db
 
 
-def server_databases(cfg):
-    """Every server database on this laptop: the configured one, a folder of sector databases
-    ("server_db_dir"), and the data folder's server.db. Label = sector name."""
-    found, seen = [], set()
-    candidates = []
-    if cfg.get("server_db_path"):
-        candidates.append(Path(cfg["server_db_path"]))
-    if cfg.get("server_db_dir") and Path(cfg["server_db_dir"]).is_dir():
-        candidates += sorted(Path(cfg["server_db_dir"]).glob("*.db"))
-    candidates.append(cfg["_data_dir"] / "db" / "server.db")
-    for p in candidates:
-        try:
-            if not p.exists() or p.resolve() in seen:
-                continue
-        except OSError:
-            continue
-        seen.add(p.resolve())
-        label = p.parent.parent.name if p.name == "server.db" and p.parent.name == "db" else p.stem
-        if label.lower() in ("proparco-data", "data", "server-agent", ""):
-            label = "server"
-        found.append((label, p))
-    return found
+from sources import server_databases  # noqa: E402  (shared with deal pages, summaries, search)
 
 
 def clean(text):

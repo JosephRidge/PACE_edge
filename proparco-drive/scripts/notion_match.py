@@ -32,7 +32,7 @@ GENERIC_DOMAINS = {"gmail", "yahoo", "hotmail", "outlook", "live", "icloud", "ao
 DOMAIN_SUFFIXES = {"com", "co", "org", "net", "int", "gov", "ac", "edu", "info", "biz", "fr", "uk",
                    "ke", "ug", "tz", "rw", "et", "dj", "bi", "mu", "za", "ng", "gh", "eu", "de",
                    "africa", "io", "global", "group", "mail"}
-WEAK_WORDS = {"bank", "group", "limited", "ltd", "plc", "sa", "sas", "fund", "funds", "capital",
+WEAK_WORDS = {"bank", "group", "groupe", "societe", "compagnie", "banque", "fonds", "limited", "ltd", "plc", "sa", "sas", "fund", "funds", "capital",
               "holding", "holdings", "company", "international", "africa", "african", "kenya",
               "east", "the", "and", "de", "of", "partners", "investment", "investments", "finance",
               "financial", "services", "energy", "power", "solar", "trust", "global", "ventures"}
@@ -45,6 +45,21 @@ MAX_FANOUT = 3      # a counterparty mention spreads to at most this many live p
 SECONDARY = 0.3     # weight when the organisation is only a co-lender/investor/channel on the deal
 GENERIC_DEAL_WORDS = {"tbd", "debt", "loan", "loans", "senior", "fund", "ii", "iii", "pe", "vc",
                       "the", "and", "de", "of", "project", "new", "2", "3"}
+# A real email domain ends in a country code or a known ending. Internal Exchange addresses
+# that could not be converted (e.g. "...@groupe.active") are not domains and are ignored.
+REAL_TLDS = {"com", "org", "net", "int", "gov", "edu", "info", "biz", "io", "africa", "global",
+             "group", "app", "dev", "ngo", "online", "bank", "finance", "capital", "ai", "co"}
+# Never enough on their own to name an organisation from a domain.
+GENERIC_LABELS = {"groupe", "group", "bank", "banque", "mail", "info", "contact", "admin", "finance",
+                  "africa", "global", "capital", "invest", "holding", "holdings"}
+# Ordinary words that are also the first word of some counterparty names: never a mention alone.
+COMMON_FIRST = {"equity", "family", "national", "standard", "first", "united", "union", "commercial",
+                "cooperative", "development", "housing", "access", "prime", "diamond", "guaranty",
+                "trust", "central", "general", "industrial", "international", "global", "imperial",
+                "victoria", "premier", "credit", "agricultural", "post", "bank", "new", "small",
+                "groupe", "group", "societe", "compagnie", "banque", "fonds", "africa", "african"}
+ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9&]{2,3}\b")      # 3-4 letters: KCB, NMB, BPR, CRDB, NCBA
+NOT_ACRONYMS = {"PLC", "LTD", "LLC", "SAS", "SARL", "BANK", "GROUP", "FUND", "THE", "AND", "TBD"}
 
 
 def load_threads(db_path, internal):
@@ -72,6 +87,8 @@ def load_threads(db_path, internal):
 
 def domain_label(addr):
     parts = [p for p in addr.split("@")[-1].lower().split(".") if p]
+    if not parts or not (len(parts[-1]) == 2 and parts[-1].isalpha() or parts[-1] in REAL_TLDS):
+        return ""                                    # not a real email domain (e.g. groupe.active)
     keep = [p for p in parts if p not in DOMAIN_SUFFIXES]
     label = max(keep, key=len) if keep else ""
     return "" if label in GENERIC_DOMAINS else label
@@ -85,9 +102,14 @@ def domain_matches(label, name):
     """Does an email domain label (e.g. 'familybank') name this counterparty?
     The whole name or its distinctive part must match the START of the label, so that
     'familybank' matches 'Family Bank' but not 'Ruai Family Hospital' or '(AMI)'."""
+    if label in GENERIC_LABELS:
+        return False
     full = normalise(name).replace(" ", "")
     core = "".join(strong_tokens(name))
-    return any(len(x) >= 4 and (label == x or label.startswith(x) or x.startswith(label) and len(label) >= 5)
+    # a label that is only the start of the name must cover most of it: 'nmbbank' ~ 'NMB Bank PLC',
+    # but never 'groupe' ~ 'Groupe Duval'
+    return any(len(x) >= 4 and (label == x or label.startswith(x)
+                                or x.startswith(label) and len(label) >= 5 and len(label) >= 0.7 * len(x))
                for x in (full, core))
 
 
@@ -136,6 +158,29 @@ def main():
     cp_names = {c["id"]: normalise(c["name"]) for c in cps.values()
                 if len(normalise(c["name"])) >= 4 and normalise(c["name"]) not in WEAK_WORDS}
 
+    # Short names used in subjects: acronyms ("KCB" in "KCB Bank") and a distinctive first word
+    # ("Centenary" in "Centenary Bank Uganda"); ordinary words such as "Equity" never count alone.
+    short_names = defaultdict(set)
+    first_count = defaultdict(int)
+    for c in cps.values():
+        toks = strong_tokens(c["name"])
+        if toks:
+            first_count[toks[0]] += 1
+    for cid, c in cps.items():
+        for a in ACRONYM_RE.findall(c["name"] or ""):
+            if a not in NOT_ACRONYMS:
+                short_names[a.lower()].add(cid)
+        toks = strong_tokens(c["name"])
+        if toks and len(toks[0]) >= 5 and toks[0] not in COMMON_FIRST and first_count[toks[0]] <= 2:
+            short_names[toks[0]].add(cid)
+
+    def deal_words(pid):
+        org_words = {w for cid in projects[pid]["counterparties"] if cid in cps
+                     for w in normalise(cps[cid]["name"]).split()}
+        return [w for w in normalise(projects[pid]["name"]).split()
+                if len(w) >= 4 and not w.isdigit() and w not in GENERIC_DEAL_WORDS
+                and w not in org_words and w not in WEAK_WORDS]
+
     threads = load_threads(db_path, internal)
     order = sorted(threads.items(), key=lambda kv: kv[1]["last"], reverse=True)
     if args.limit:
@@ -182,26 +227,38 @@ def main():
                 unknown.append(addr)
 
         text = " " + normalise(" ".join(t["subjects"]) + " " + " ".join(t["text"])) + " "
+        subject = " " + normalise(" ".join(t["subjects"])) + " "
+
+        def mention(cid, why):
+            # a mention identifies the counterparty, not one deal:
+            #  - one live deal: it can only mean that deal (stronger credit)
+            #  - a few live deals: credit each
+            #  - many live deals: only those whose own words are in the subject ("KCB Bond" ->
+            #    KCB Kenya - Sustainable Bond 2026, not KCB - Trade Finance)
+            live = [pid for pid in projects_of_cp.get(cid, ()) if not is_inactive(projects[pid]["status"])]
+            if len(live) > MAX_FANOUT:
+                live = [pid for pid in live if any(f" {w} " in subject for w in deal_words(pid))]
+                if len(live) > MAX_FANOUT:
+                    return
+            for pid in live:
+                credit(pid, "counterparty", why, cid)
+            if len(live) == 1 and (live[0], "only", cid) not in credited:
+                credited.add((live[0], "only", cid))
+                scores[live[0]] += 1.0
+                evidence[live[0]].append(f"its only live deal with {cps[cid]['name']}")
+
         for pid, name in deal_names.items():
             if f" {name} " in text:
                 credit(pid, "deal name", f"deal name '{projects[pid]['name']}' mentioned")
         for cid, name in cp_names.items():
             if f" {name} " in text:
-                # a mention identifies the counterparty, not one deal: credit its live projects,
-                # and only when there are few of them
-                live = [pid for pid in projects_of_cp.get(cid, ()) if not is_inactive(projects[pid]["status"])]
-                if len(live) <= MAX_FANOUT:
-                    for pid in live:
-                        credit(pid, "counterparty", f"counterparty '{cps[cid]['name']}' mentioned", cid)
-
-        subject = " " + normalise(" ".join(t["subjects"])) + " "
+                mention(cid, f"counterparty '{cps[cid]['name']}' mentioned")
+        for short, cids in short_names.items():
+            if f" {short} " in subject:
+                for cid in cids:
+                    mention(cid, f"'{short.upper() if len(short) <= 6 else short}' in the subject ~ {cps[cid]['name']}")
         for pid in list(scores):
-            org_words = {w for cid in projects[pid]["counterparties"] if cid in cps
-                         for w in normalise(cps[cid]["name"]).split()}
-            words = [w for w in normalise(projects[pid]["name"]).split()
-                     if len(w) >= 4 and not w.isdigit() and w not in GENERIC_DEAL_WORDS
-                     and w not in org_words and w not in WEAK_WORDS]
-            hits = [w for w in words if f" {w} " in subject or f" {w} " in text]
+            hits = [w for w in deal_words(pid) if f" {w} " in subject or f" {w} " in text]
             if hits:
                 scores[pid] += min(2.0, 1.0 * len(hits))
                 evidence[pid].append("deal word(s) in the email: " + ", ".join(hits[:3]))
