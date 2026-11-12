@@ -3,6 +3,8 @@
 #
 #   ./review-duplicates.sh <exported-mailbox-folder>               # copy emails, scan, open the page
 #   ./review-duplicates.sh <exported-mailbox-folder> --scan-only   # copy emails, print the report
+#   ./review-duplicates.sh <exported-mailbox-folder> --attachments # also compare attachments (read
+#                                                                  #   from the source, never copied)
 #   ./review-duplicates.sh <folder> --in-place                     # work directly on <folder>
 #                                                                  #   (only for a folder that is already a copy)
 # <exported-mailbox-folder> is the folder that contains "acquisitions", e.g.
@@ -15,14 +17,15 @@
 # refreshes the copy and keeps the decisions already made there.
 set -euo pipefail
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 [ $# -ge 1 ] || usage
 SRC="${1%/}"; shift
-SCAN_ONLY=""; IN_PLACE=""; PORT=8766
+SCAN_ONLY=""; IN_PLACE=""; ATT=""; PORT=8766
 while [ $# -gt 0 ]; do
   case "$1" in
     --scan-only) SCAN_ONLY="--scan-only" ;;
     --in-place)  IN_PLACE=1 ;;
+    --attachments) ATT="--attachments" ;;
     --port)      PORT="$2"; shift ;;
     *) usage ;;
   esac; shift
@@ -68,6 +71,7 @@ python3 -c "import sqlite_vec" 2>/dev/null || echo "Note: sqlite-vec not availab
 
 # ---------------------------------------------------------------- run
 export PROPARCO_DATA_DIR="$WORK"
+export PROPARCO_ATTACH_ROOT="$SRC"          # attachments are read from the source, never copied
 N=$(python3 - "$WORK" <<'EOF'
 import json, glob, sys
 n = 0
@@ -79,4 +83,5 @@ EOF
 )
 echo "Emails to scan: $N  (about $(( N / 3500 + 1 )) min on this laptop)"
 cd "$HERE"
-exec python3 -B scripts/dedupe.py $SCAN_ONLY --port "$PORT"
+[ -n "$ATT" ] && echo "Attachments: read from the source (first run reads every file once; later runs use the cache)."
+exec python3 -B scripts/dedupe.py $SCAN_ONLY $ATT --port "$PORT"

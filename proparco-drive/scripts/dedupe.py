@@ -22,6 +22,15 @@ Three kinds of duplicate, each group labelled with the strongest link found:
 One email per group is proposed to keep (most attachments saved, then not in Deleted Items or
 Junk, then has a Message-ID, then earliest); the review page can change that choice.
 
+With --attachments, every saved attachment is fingerprinted (SHA-256 of its content; cached, so a
+second run does not re-read the files), which adds:
+  4. same attachments - the same files (by content, not name), same sender, same subject or
+                       within 7 days, and little or no own text: "Please find attached" twice
+  - an attachment report: unique files, repeated copies and the space they take, inline images
+    (signature logos) counted apart, and the documents that circulate most.
+Attachments are found where the export saved them, or beside their export on this machine, or
+under PROPARCO_ATTACH_ROOT (the original mailbox folder, when reviewing a copy without them).
+
 Removal is reversible:
   - index: the removed emails' rows are deleted, after a backup of the database
   - exported copies: nothing is deleted; removed emails move to removed-duplicates.json beside
@@ -49,6 +58,7 @@ from engine import load_config  # noqa: E402
 NEAR_THRESHOLD = 0.90          # own-text similarity for a near-duplicate
 MIN_OWN_WORDS = 25             # shorter own texts are too short to judge as near-duplicates
 MAX_BLOCK = 300                # largest group of same-subject emails compared pairwise
+ATT_DAYS = 7                   # "same attachments": same subject, or sent within this many days
 BIN_FOLDERS = re.compile(r"deleted|supprim|junk|ind[eé]sirable|spam|corbeille|trash", re.I)
 SUBJECT_PREFIX = re.compile(r"^\s*((re|fw|fwd|tr|aw|wg|rv|sv|antw)\s*(\[\d+\])?\s*:\s*)+", re.I)
 
@@ -93,6 +103,9 @@ def load_records(data):
             body = m.get("body") or ""
             own = own_text(body)
             atts = [a for a in (m.get("attachments") or []) if isinstance(a, dict)]
+            files = [{"name": a.get("filename") or "", "size": int(a.get("sizeBytes") or 0),
+                      "path": a.get("localPath") or "", "inline": bool(a.get("inline")),
+                      "saved": bool(a.get("acquired"))} for a in atts]
             recs.append({
                 "key": f"{acq.parent.name}#{i}", "run": acq.parent.name, "idx": i,
                 "entryId": m.get("entryId") or "", "messageId": (m.get("messageId") or "").strip(),
@@ -103,6 +116,8 @@ def load_records(data):
                 "itemClass": m.get("itemClass") or "",
                 "attachments": len(atts), "attachmentsSaved": sum(1 for a in atts if a.get("acquired")),
                 "size": len(body), "bodyHash": hashlib.sha1(norm_text(body).encode()).hexdigest(),
+                "files": files, "attHashes": frozenset(),
+                "senderKey": ((m.get("senderEmail") or "") or (m.get("sender") or "")).lower().strip(),
                 "own": own, "ownWords": len(norm_text(own).split()),
             # a re-send or forwarded copy carries the SAME numbers; a recurring report or notice
             # (same wording, another date or amount) does not, and is never a near-duplicate
@@ -110,6 +125,96 @@ def load_records(data):
                 "preview": " ".join(own.split())[:700] or " ".join(body.split())[:700],
             })
     return recs
+
+
+# ================================================================ attachments
+
+def attachment_file(data, run, path):
+    """Where a saved attachment is on THIS machine: as recorded, beside its export, or under
+    PROPARCO_ATTACH_ROOT (the original mailbox folder when reviewing a light copy)."""
+    import os
+    name = Path((path or "").replace("\\", "/")).name
+    if not name:
+        return None
+    cands = [Path(path)] if path else []
+    cands.append(data / "acquisitions" / run / "attachments" / name)
+    root = os.environ.get("PROPARCO_ATTACH_ROOT")
+    if root:
+        cands.append(Path(root) / "acquisitions" / run / "attachments" / name)
+    for c in cands:
+        try:
+            if c.is_file():
+                return c
+        except OSError:
+            continue
+    return None
+
+
+def hash_attachments(data, recs, cache_dir):
+    """SHA-256 of every saved attachment's content (cached by export, file name and size)."""
+    cache_path = cache_dir / "attachment-hashes.json"
+    cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+    todo = [(r, f) for r in recs for f in r["files"] if f["saved"]]
+    total_bytes = sum(f["size"] for _, f in todo)
+    done_bytes, missing, read_now, t0, last = 0, 0, 0, time.time(), time.time()
+    print(f"  fingerprinting {len(todo):,} saved attachments ({total_bytes / 1e9:.1f} GB; cached ones are skipped) ...")
+    for r, f in todo:
+        key = f"{r['run']}/{Path(f['path'].replace(chr(92), '/')).name}|{f['size']}"
+        if key in cache:
+            f["hash"] = cache[key]
+        else:
+            p = attachment_file(data, r["run"], f["path"])
+            if p is None:
+                missing += 1
+                continue
+            h = hashlib.sha256()
+            with open(p, "rb") as fh:
+                for block in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(block)
+            f["hash"] = cache[key] = h.hexdigest()
+            read_now += 1
+        done_bytes += f["size"]
+        if time.time() - last > 15:
+            last = time.time()
+            rate = done_bytes / max(1, time.time() - t0)
+            print(f"    {done_bytes / 1e9:.1f} of {total_bytes / 1e9:.1f} GB "
+                  f"(~{(total_bytes - done_bytes) / max(rate, 1) / 60:.0f} min left)", flush=True)
+            cache_path.write_text(json.dumps(cache), encoding="utf-8")
+    cache_path.write_text(json.dumps(cache), encoding="utf-8")
+    for r in recs:
+        r["attHashes"] = frozenset(f["hash"] for f in r["files"] if f.get("hash") and not f["inline"])
+    return {"read": read_now, "missing": missing}
+
+
+def attachment_report(recs, hstats):
+    seen, reclaim, copies, inline_n, inline_bytes = {}, 0, 0, 0, 0
+    for r in recs:
+        for f in r["files"]:
+            h = f.get("hash")
+            if not h:
+                continue
+            if f["inline"]:
+                inline_n += 1
+                inline_bytes += f["size"]
+                continue
+            if h in seen:
+                copies += 1
+                reclaim += f["size"]
+                seen[h]["emails"] += 1
+            else:
+                seen[h] = {"name": f["name"], "size": f["size"], "emails": 1}
+    top = sorted((v for v in seen.values() if v["emails"] > 1), key=lambda v: (-v["emails"], -v["size"]))[:20]
+    return {"saved": sum(1 for r in recs for f in r["files"] if f["saved"]),
+            "fingerprinted": sum(1 for r in recs for f in r["files"] if f.get("hash")),
+            "notFound": hstats.get("missing", 0), "unique": len(seen), "repeatedCopies": copies,
+            "repeatedBytes": reclaim, "inline": inline_n, "inlineBytes": inline_bytes, "top": top}
+
+
+def when(r):
+    try:
+        return datetime.fromisoformat((r["received"] or "")[:19])
+    except ValueError:
+        return None
 
 
 # ================================================================ finding duplicates
@@ -199,6 +304,23 @@ def find_duplicates(recs):
                 if sim >= NEAR_THRESHOLD:
                     g.link(a, b, 3, sim)
 
+    by = {}                                                        # 4. same attachments
+    for i, r in enumerate(recs):
+        if r["attHashes"] and r["ownWords"] < MIN_OWN_WORDS:
+            by.setdefault(r["attHashes"], []).append(i)
+    for ids in by.values():
+        for a_pos, a in enumerate(ids[:MAX_BLOCK]):
+            for b in ids[a_pos + 1:MAX_BLOCK]:
+                ra, rb = recs[a], recs[b]
+                if g.find(a) == g.find(b) or ra["senderKey"] != rb["senderKey"]:
+                    continue
+                if numbers(ra["subject"]) != numbers(rb["subject"]):
+                    continue
+                ta, tb = when(ra), when(rb)
+                close = ta and tb and abs((ta - tb).total_seconds()) <= ATT_DAYS * 86400
+                if norm_subject(ra["subject"]) == norm_subject(rb["subject"]) or close:
+                    g.link(a, b, 4)
+
     members = {}
     for i in range(len(recs)):
         members.setdefault(g.find(i), []).append(i)
@@ -230,8 +352,10 @@ def choose_keeper(rs):
 
 
 def public(r):
-    return {k: r[k] for k in ("key", "run", "idx", "entryId", "messageId", "subject", "sender", "received",
-                              "folder", "itemClass", "attachments", "attachmentsSaved", "size", "preview")}
+    d = {k: r[k] for k in ("key", "run", "idx", "entryId", "messageId", "subject", "sender", "received",
+                           "folder", "itemClass", "attachments", "attachmentsSaved", "size", "preview")}
+    d["files"] = [f["name"] for f in r["files"] if not f["inline"]][:6]
+    return d
 
 
 # ================================================================ state, apply, restore
@@ -255,9 +379,11 @@ class Store:
         tmp.write_text(json.dumps(self.state, ensure_ascii=False, indent=1), encoding="utf-8")
         tmp.replace(self.state_path)
 
-    def scan(self):
+    def scan(self, attachments=False):
         recs = load_records(self.data)
+        hstats = hash_attachments(self.data, recs, self.dir) if attachments else None
         groups, stats = find_duplicates(recs)
+        self.state["attachments"] = attachment_report(recs, hstats) if attachments else None
         applied_ids = {a["id"] for a in self.state.get("applied", [])}
         self.state["groups"] = [x for x in groups if x["id"] not in applied_ids]
         self.state["stats"] = dict(stats, emails=len(recs))
@@ -415,7 +541,7 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Duplicate emails</title>
 <style>
 :root{--bg:#f7f7f5;--card:#fff;--ink:#1d1d1b;--mute:#6b6b66;--line:#e2e1dc;--keep:#2f9e44;--drop:#c92a2a;
---t1:#1971c2;--t2:#6741d9;--t3:#e8590c;--hi:#fff3bf}
+--t1:#1971c2;--t2:#6741d9;--t3:#e8590c;--t4:#0c8599;--hi:#fff3bf}
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--card:#20201e;--ink:#ecebe6;--mute:#a3a29b;--line:#383732;
 --hi:#4a3f12}}
 *{box-sizing:border-box}body{margin:0;font:15px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--ink)}
@@ -425,7 +551,8 @@ button,select{font:inherit;padding:6px 12px;border-radius:7px;border:1px solid v
 button.primary{background:var(--drop);color:#fff;border-color:var(--drop)}button:disabled{opacity:.45;cursor:default}
 main{padding:16px 20px;max-width:1300px;margin:auto}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;margin:0 0 14px;padding:12px 14px}
 .badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:20px;color:#fff;margin-right:6px}
-.t1{background:var(--t1)}.t2{background:var(--t2)}.t3{background:var(--t3)}
+.t1{background:var(--t1)}.t2{background:var(--t2)}.t3{background:var(--t3)}.t4{background:var(--t4)}
+#att{display:none}#att.open{display:block}.small{font-size:13px}
 table{width:100%;border-collapse:collapse;margin-top:8px;font-size:14px}td,th{text-align:left;padding:5px 6px;border-top:1px solid var(--line);vertical-align:top}
 tr.keep td{background:color-mix(in srgb,var(--keep) 10%,transparent)}tr.drop td{color:var(--mute);text-decoration:line-through}
 .prev{display:none;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-top:8px}.prev.open{display:grid}
@@ -436,18 +563,28 @@ tr.keep td{background:color-mix(in srgb,var(--keep) 10%,transparent)}tr.drop td{
 <div class="mute" id="sum"></div>
 <div class="row" style="margin-top:8px">
  <label>Show <select id="flt"><option value="0">all kinds</option><option value="1">1 · same email</option>
- <option value="2">2 · identical</option><option value="3">3 · near-duplicate</option></select></label>
+ <option value="2">2 · identical</option><option value="3">3 · near-duplicate</option>
+ <option value="4">4 · same attachments</option></select></label>
  <button onclick="selKind(1)">Select all "same email"</button><button onclick="selKind(2)">Select all "identical"</button>
  <button onclick="selNone()">Select none</button>
  <button class="primary" id="apply" onclick="apply()">Remove duplicates in selected groups</button>
- <button onclick="rescan()">Scan again</button><button onclick="showApplied()">Removed groups / restore</button></div>
+ <button onclick="rescan()">Scan again</button><button onclick="showApplied()">Removed groups / restore</button>
+ <button id="attbtn" onclick="document.getElementById('att').classList.toggle('open')" style="display:none">Attachment report</button></div>
+<div id="att" class="card small"></div>
 <div id="msg"></div></header><main id="list"></main>
 <script>
-const KIND={1:"same email (Message-ID)",2:"identical content",3:"near-duplicate"};
+const KIND={1:"same email (Message-ID)",2:"identical content",3:"near-duplicate",4:"same attachments"};
 let S={groups:[],applied:[]},sel={},keep={};
 const esc=s=>(s??"").toString().replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 async function load(){S=await (await fetch("api/state")).json();S.groups.forEach(g=>{keep[g.id]??=g.keep});render()}
-function render(){const f=+document.getElementById("flt").value,L=document.getElementById("list");
+function attPanel(){const a=S.attachments,b=document.getElementById("attbtn"),p=document.getElementById("att");
+ if(!a){b.style.display="none";return}b.style.display="";const gb=x=>(x/1e9).toFixed(2)+" GB",mb=x=>(x/1e6).toFixed(1)+" MB";
+ p.innerHTML=`<b>Attachments</b>: ${a.saved.toLocaleString()} saved · ${a.unique.toLocaleString()} unique documents · `+
+  `${a.repeatedCopies.toLocaleString()} repeated copies (${gb(a.repeatedBytes)}) · ${a.inline.toLocaleString()} inline images such as signature logos (${gb(a.inlineBytes)})`+
+  (a.notFound?` · ${a.notFound.toLocaleString()} not found on this machine`:"")+
+  `<table><tr><th>Most circulated documents</th><th>In emails</th><th>Size</th></tr>`+
+  a.top.map(t=>`<tr><td>${esc(t.name)}</td><td>${t.emails}</td><td>${mb(t.size)}</td></tr>`).join("")+`</table>`}
+function render(){attPanel();const f=+document.getElementById("flt").value,L=document.getElementById("list");
  const gs=S.groups.filter(g=>!f||g.tier===f);const st=S.stats||{};
  const rm=S.groups.reduce((n,g)=>n+g.members.length-1,0);
  document.getElementById("sum").textContent=`${S.groups.length} group(s) to review, ${rm} removable copies, in ${st.emails??"?"} exported emails`+
@@ -461,7 +598,7 @@ function render(){const f=+document.getElementById("flt").value,L=document.getEl
   <table><tr><th>Keep</th><th>Why</th><th>Received</th><th>From</th><th>Folder</th><th>Type</th><th>Attachments</th><th>Size</th></tr>
   ${g.members.map(m=>`<tr class="${m.key===keep[g.id]?"keep":(sel[g.id]?"drop":"")}"><td><input type="radio" name="k${g.id}" ${m.key===keep[g.id]?"checked":""}
    onchange="keep['${g.id}']='${m.key}';render()"></td><td><span class="badge t${m.link}">${m.link}</span></td><td>${esc((m.received||"").slice(0,16).replace("T"," "))}</td><td>${esc(m.sender)}</td>
-   <td>${esc(m.folder)}</td><td>${esc((m.itemClass||"").replace("IPM.",""))}</td><td>${m.attachmentsSaved}/${m.attachments}</td><td>${(m.size/1024).toFixed(1)} KB</td></tr>`).join("")}</table>
+   <td>${esc(m.folder)}</td><td>${esc((m.itemClass||"").replace("IPM.",""))}</td><td title="${esc((m.files||[]).join(', '))}">${m.attachmentsSaved}/${m.attachments}${(m.files||[]).length?'<div class="mute small">'+esc((m.files||[]).slice(0,3).join(', '))+'</div>':''}</td><td>${(m.size/1024).toFixed(1)} KB</td></tr>`).join("")}</table>
   <div class="prev">${g.members.map(m=>`<div><b>${esc((m.received||"").slice(0,16).replace("T"," "))} · ${esc(m.folder)}</b>\n\n${esc(m.preview)}</div>`).join("")}</div>`;
   L.appendChild(c)}upd()}
 function upd(){const n=Object.values(sel).filter(Boolean).length;const b=document.getElementById("apply");b.disabled=!n;b.textContent=`Remove duplicates in ${n} selected group(s)`}
@@ -517,7 +654,7 @@ def serve(store, port):
                 if self.path == "/api/restore":
                     return self._send(200, json.dumps(store.restore(body.get("id"))))
                 if self.path == "/api/scan":
-                    store.scan()
+                    store.scan(attachments=getattr(store, "attachments", False))
                     return self._send(200, json.dumps({"ok": True}))
             except Exception as err:
                 return self._send(200, json.dumps({"ok": False, "message": f"Stopped: {err}"}))
@@ -538,6 +675,8 @@ def serve(store, port):
 def main():
     ap = argparse.ArgumentParser(description="Find, review and remove duplicate emails in the exported copies.")
     ap.add_argument("--scan-only", action="store_true", help="scan and print the report; change nothing")
+    ap.add_argument("--attachments", action="store_true",
+                    help="also fingerprint attachments (finds 'same attachments' duplicates; reads every file once)")
     ap.add_argument("--port", type=int, default=8766)
     args = ap.parse_args()
     cfg = load_config()
@@ -547,14 +686,22 @@ def main():
     store = Store(data)
     t0 = time.time()
     print(f"Scanning {data / 'acquisitions'} ...")
-    st = store.scan()
-    kinds = {1: 0, 2: 0, 3: 0}
+    st = store.scan(attachments=args.attachments)
+    store.attachments = args.attachments
+    kinds = {1: 0, 2: 0, 3: 0, 4: 0}
     for x in st["groups"]:
         kinds[x["tier"]] += 1
     copies = sum(len(x["members"]) - 1 for x in st["groups"])
     print(f"  {st['stats']['emails']:,} exported emails scanned in {time.time() - t0:.0f} s")
     print(f"  {len(st['groups'])} duplicate group(s): {kinds[1]} same email, {kinds[2]} identical, "
-          f"{kinds[3]} near-duplicate; {copies} removable copies")
+          f"{kinds[3]} near-duplicate, {kinds[4]} same attachments; {copies} removable copies")
+    a = st.get("attachments")
+    if a:
+        print(f"  attachments: {a['saved']:,} saved, {a['unique']:,} unique documents, {a['repeatedCopies']:,} repeated "
+              f"copies ({a['repeatedBytes'] / 1e9:.2f} GB), {a['inline']:,} inline images"
+              + (f"; {a['notFound']:,} not found on this machine" if a['notFound'] else ""))
+        for t in a["top"][:5]:
+            print(f"     in {t['emails']:3} emails: {t['name'][:60]} ({t['size'] / 1e6:.1f} MB)")
     if st["stats"].get("different_numbers"):
         print(f"  {st['stats']['different_numbers']:,} similar pair(s) kept apart: same wording, different "
               f"numbers (recurring reports, notices)")
