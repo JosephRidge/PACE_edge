@@ -81,7 +81,57 @@ def pptx_text(path):
                            for i, n in enumerate(slides, 1))
 
 
+XLSX_READER = "table-aware v2"          # recorded so re-reads of spreadsheets can be told apart
+
+def _col_index(ref):
+    """'C5' -> 2 (zero-based column)."""
+    n = 0
+    for ch in re.match(r"[A-Z]+", ref or "A").group(0):
+        n = n * 26 + (ord(ch) - 64)
+    return n - 1
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt(v):
+    """Numbers rounded to 6 significant figures; text as is."""
+    f = _num(v)
+    if f is None or f != f or f in (float("inf"), float("-inf")):   # text, NaN or infinity: as written
+        return v
+    if f == int(f) and abs(f) < 1e15:
+        return str(int(f))
+    return f"{f:.6g}"
+
+
+def _period(v):
+    """An Excel date serial (e.g. 44196 = 31/12/2020) or a year, as a period name; otherwise None."""
+    f = _num(v)
+    if f is not None and 30000 <= f <= 60000 and f == int(f):
+        from datetime import date, timedelta
+        d = date(1899, 12, 30) + timedelta(days=int(f))
+        return f"FY{d.year}" if (d.month, d.day) == (12, 31) else d.isoformat()
+    if f is not None and 1990 <= f <= 2100 and f == int(f):
+        return f"FY{int(f)}"
+    if isinstance(v, str) and re.fullmatch(r"(FY|CY)?\s?(19|20)\d\d[A-Z]?", v.strip(), re.I):
+        return v.strip().upper().replace(" ", "")
+    return None
+
+
+PERIOD_KIND = re.compile(r"^(actuals?|budget|forecasts?|projections?|estimates?|plan|ltm|ytd)$", re.I)
+
+
 def xlsx_text(path, max_rows=2000):
+    """Spreadsheet text, table-aware: every value keeps its column (empty cells stay empty); rows of
+    dates or years become period headings (FY2020...), a following row of Actual/Budget/Forecast is
+    attached to them, side-by-side tables are recognised by their titles, and each row under such
+    headings is written as one self-describing line:
+        <table title> · <row name> · FY2020 Actual: 0.409 · FY2021 Actual: 0.604 · ...
+    Sheets without period headings are written row by row, with gaps kept."""
     ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     with zipfile.ZipFile(path) as z:
         shared = []
@@ -101,12 +151,13 @@ def xlsx_text(path, max_rows=2000):
             idx = int(re.findall(r"\d+", n)[-1])
             out.append(f"[Sheet {names.get(idx, idx)}]")
             root = ET.fromstring(z.read(n))
+            rows = []
             for r_i, row in enumerate(root.iter(f"{{{ns['m']}}}row")):
                 if r_i >= max_rows:
-                    out.append("(further rows not read)")
+                    rows.append(None)
                     break
-                cells = []
-                for c in row.findall("m:c", ns):
+                cells = {}
+                for k, c in enumerate(row.findall("m:c", ns)):
                     v = c.find("m:v", ns)
                     t = c.get("t")
                     if t == "s" and v is not None and v.text and v.text.isdigit():
@@ -115,10 +166,56 @@ def xlsx_text(path, max_rows=2000):
                         val = "".join(x.text or "" for x in c.iter(f"{{{ns['m']}}}t"))
                     else:
                         val = v.text if v is not None and v.text else ""
-                    if val:
-                        cells.append(val.strip())
-                if cells:
-                    out.append(" | ".join(cells))
+                    if val and val.strip():
+                        cells[_col_index(c.get("r")) if c.get("r") else k] = val.strip()
+                rows.append(cells)
+            heads, blocks, side = {}, [], {}  # column -> period; [(first, end, title column, title)]; column -> side heading
+            for cells in rows:
+                if cells is None:
+                    out.append("(further rows not read)")
+                    break
+                if not cells:
+                    continue
+                periods = {c: _period(v) for c, v in cells.items() if _period(v)}
+                if len(periods) >= 3:        # a heading row: dates or years across the columns
+                    heads = dict(periods)
+                    cols = sorted(periods)
+                    runs, cur = [], [cols[0]]
+                    for c in cols[1:]:
+                        if c - cur[-1] > 1:
+                            runs.append(cur); cur = [c]
+                        else:
+                            cur.append(c)
+                    runs.append(cur)
+                    blocks = []
+                    for run in runs:
+                        st, end = run[0], run[-1] + 1
+                        title_col = max([c for c in cells if c < st and _period(cells[c]) is None] or [st - 1])
+                        blocks.append((st, end, title_col, cells.get(title_col, "")))
+                    titled = {b[2] for b in blocks}
+                    side = {c: v for c, v in cells.items() if c not in heads and c not in titled}   # e.g. CAGR
+                    continue
+                kinds = {c: v for c, v in cells.items() if PERIOD_KIND.match(v)}
+                if heads and len(kinds) >= 3 and set(kinds) & set(heads):   # Actual / Budget / Forecast under them
+                    for c, v in kinds.items():
+                        if c in heads and v.lower() not in heads[c].lower():
+                            heads[c] = f"{heads[c]} {v}"
+                    continue
+                if not heads:
+                    ordered = [cells.get(c, "") for c in range(0, max(cells) + 1)]
+                    out.append(" | ".join(_fmt(v) for v in ordered).rstrip(" |"))
+                    continue
+                # a data row under period headings: one line per side-by-side table
+                done = set()
+                for st, end, title_col, title in blocks:
+                    label = cells.get(title_col, "")
+                    vals = [f"{heads[c]}: {_fmt(cells[c])}" for c in sorted(cells) if st <= c < end and c in heads]
+                    if label or vals:
+                        out.append(" · ".join([x for x in (title, label) if x] + vals))
+                    done |= {c for c in cells if title_col <= c < end}
+                rest = [(f"{side[c]}: " if c in side else "") + _fmt(cells[c]) for c in sorted(cells) if c not in done]
+                if rest:                     # notes, CAGR columns, commentary beside the tables
+                    out.append("  (beside: " + " | ".join(rest) + ")")
         return "\n".join(out)
 
 
@@ -399,6 +496,9 @@ def main():
     ap.add_argument("--max-chars", type=int, default=300000,
                     help="text kept per document (default 300,000 characters)")
     ap.add_argument("--days", type=int, default=0, help="only files changed in the last N days")
+    ap.add_argument("--reread", action="append", default=[],
+                    help="re-read files of this type even if unchanged, e.g. --reread .xlsx after the "
+                         "spreadsheet reader improved; indexing then replaces their old text")
     ap.add_argument("--batch", type=int, default=300, help="documents per saved batch")
     ap.add_argument("--workers", type=int, default=None,
                     help=f"files fetched at the same time (default {DEFAULT_WORKERS}; 1 = one by one)")
@@ -433,6 +533,9 @@ def main():
         return inventory(roots, excludes, data / "inventory", check_access=args.check_access)
 
     index_path = data / "sdrive-index.json"          # what was read before: path -> size:mtime
+    reread = {e.lower() if e.startswith(".") else "." + e.lower() for e in args.reread}
+    if reread:
+        print(f"Re-reading every {', '.join(sorted(reread))} file, even if unchanged ({XLSX_READER} spreadsheet reader).", flush=True)
     try:
         seen = json.loads(index_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -453,8 +556,8 @@ def main():
             continue
         stamp = f"{size}:{int(mtime)}"
         prev = seen.get(str(p), "")
-        if prev == stamp:
-            continue                                  # unchanged since the last run
+        if prev == stamp and p.suffix.lower() not in reread:
+            continue                                  # unchanged since the last run (unless its type is re-read)
         if prev.startswith("denied|"):                # refused before: retry rarely, so the
             _, old_stamp, when = prev.split("|", 2)   # server logs few "access denied" lines
             try:

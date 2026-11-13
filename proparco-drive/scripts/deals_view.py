@@ -50,7 +50,7 @@ def read_db(path):
     return db
 
 
-MAX_EMAILS_PER_THREAD = 5   # newest emails shown per thread (the agent summary covers them all)
+MAX_EMAILS_PER_THREAD = 60  # emails shown per thread (all of them, up to this many)
 MAX_OPEN_THREADS = 5        # newest threads shown open per deal; older ones folded
 EMAIL_TEXT_CHARS = 3000     # email text kept on the page (the full text stays in the database)
 
@@ -586,6 +586,7 @@ details.sec{margin-top:14px;border-top:1px solid #8883;padding-top:8px}details.s
 .upd .verdict{margin:6px 0 8px;font-weight:600}.upd.ready .verdict{color:#2f9e44}.upd.wait .verdict{color:#e8590c}.upd.none .verdict{color:#777}.updt{width:100%;border-collapse:collapse;font-size:13.5px}.updt th,.updt td{vertical-align:top;text-align:left;padding:6px;border-top:1px solid #8883}.updt th:first-child{width:150px}.updt mark{background:#d3f9d8;color:inherit;padding:0 2px;border-radius:3px}@media (prefers-color-scheme:dark){.updt mark{background:#1f4d2b}}.updt a.copy{font-size:12px;font-weight:600}
 .upd .updtitle{display:inline-block;background:#fff4e6;color:#d9480f;border:1px solid #ffa94d;border-radius:8px;padding:3px 10px}@media (prefers-color-scheme:dark){.upd .updtitle{background:#3b2410;color:#ffa94d}}.upd .action{margin:8px 0 10px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}button.approve{font:inherit;font-weight:700;border:0;border-radius:9px;padding:8px 16px;background:#2f9e44;color:#fff;cursor:pointer}button.approve:disabled{background:#adb5bd;cursor:default}.upd .approved{color:#2f9e44;font-weight:600}.upd .approved a{margin-left:8px;font-weight:400}
 .approvebtn{display:inline-block;font:inherit;font-weight:600;font-size:13px;padding:4px 12px;border-radius:8px;border:1px solid #2f9e44;background:transparent;color:#2f9e44;cursor:pointer}.approvebtn:hover:not(:disabled){background:#2f9e44;color:#fff}.approvebtn:disabled{border-color:#adb5bd;color:#adb5bd;cursor:default}.upd .chk{display:flex;gap:6px;align-items:center;font-size:13px}
+.stale{display:inline-block;margin-left:6px;font-size:11.5px;font-weight:600;color:#c2410c;border:1px solid #ffa94d;border-radius:6px;padding:0 6px}
 </style></head><body>
 <header><button id="menuBtn" class="menubtn" title="Show or hide the deal list" aria-label="Menu">&#9776;</button>
 <h1>Deals: emails and documents</h1>__WHO__<span class="spacer"></span>
@@ -637,7 +638,7 @@ function notionUpdate(d, p) {
   const done = steps.filter(x => x.startsWith('✓')).length;
   const added = steps.filter(x => !x.startsWith('✓') && !nOld.includes(norm(x.split(' — ')[0])));
   const stepsNew = steps.map(x => x.startsWith('✓') ? '<s>' + esc(x.replace(/^✓\s*/, '')) + '</s> ✓ done'
-                                   : (added.includes(x) ? '<mark>' + esc(x) + '</mark>' : esc(x))).join('<br>') || para('');
+                                   : (added.includes(x) ? '<mark>' + staleMark(x) + '</mark>' : staleMark(x))).join('<br>') || para('');
   const stepsChange = [done ? `${done} marked done` : '', added.length ? `${added.length} added` : ''].filter(Boolean).join(', ') || 'No change';
   const changed = !!(p.added || hAdd.length || done || added.length);
   const verdict = !changed ? ['none', 'Nothing to update: Notion already reflects what the emails and documents say.']
@@ -715,6 +716,23 @@ document.addEventListener('click', e => {
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, () => { prompt('Copy this text:', t); });
   else prompt('Copy this text:', t);
 });
+// next steps whose date has passed: "Call with AFMEA on Monday, 14 September" (no year = this year)
+const MONTHS = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+function stepDate(t) {
+  const x = (t || '').toLowerCase(); let m, d, y;
+  if ((m = x.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december)\b(?:\s+(\d{4}))?/)))
+    { d = +m[1]; y = m[3] ? +m[3] : null; m = MONTHS.indexOf(m[2]); }
+  else if ((m = x.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?\b(?:,?\s+(\d{4}))?/)))
+    { d = +m[2]; y = m[3] ? +m[3] : null; m = MONTHS.indexOf(m[1]); }
+  else if ((m = x.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/))) { d = +m[1]; y = +m[3]; m = +m[2] - 1; }
+  else return null;
+  const now = new Date(), dt = new Date(y || now.getFullYear(), m, d);
+  return isNaN(dt) ? null : dt;
+}
+function staleMark(text) {          // escaped text, with a flag on each line whose date has passed
+  return (text || '').split('\n').map(l => { const dt = stepDate(l), today = new Date(); today.setHours(0, 0, 0, 0);
+    return esc(l) + (dt && dt < today && !/^\s*✓/.test(l) ? ' <span class="stale">date passed: check whether it happened</span>' : ''); }).join('<br>');
+}
 const para = s => (s && s.trim()) ? esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>') : '<span class="none">(empty)</span>';
 let current = null;
 function items() {
@@ -804,7 +822,7 @@ function threadCard(t) {
       <tr><th>History</th><td>${para(t.agent.history)}</td></tr>
       <tr><th>Next steps</th><td>${para(t.agent.next)}</td></tr></table>` : ''}
     ${t.review ? '<div class="why" style="color:var(--warn)">Check before using: some names or numbers in this summary could not be matched word for word to the email (details under each email).</div>' : ''}
-    ${t.emails.length ? `<details style="margin-top:8px"><summary>Show the ${t.olderEmails ? 'latest ' : ''}${t.emails.length} email(s) and attachments</summary>
+    ${t.emails.length ? `<details style="margin-top:8px"><summary>Show ${t.olderEmails ? 'the latest ' + t.emails.length + ' of ' + t.count : (t.emails.length > 1 ? 'all ' + t.emails.length : 'the')} email${t.emails.length > 1 ? 's' : ''} and attachments</summary>
       ${t.emails.map(e => `<div class="card"><strong>${esc(e.date)}</strong> · ${esc(e.subject)}
         <div class="why">From ${esc(e.from)}${e.to.length ? ' to ' + esc(e.to.join(', ')) : ''}</div>
         ${attList(e.attachments)}
@@ -837,24 +855,35 @@ function show(id) {
         if (f.done) parts.push(`${f.done} Notion step${f.done > 1 ? 's' : ''} marked done`);
         return `<div class="why" style="margin-top:6px"><b>What the agent found:</b> ` +
           (parts.length ? parts.join(', ') + '.' : `nothing new beyond Notion's record`) +
-          ` It read ${n || p.emails} email excerpt(s)${p.documents.length ? ' and ' + p.documents.length + ' document passage(s)' : ''}` +
+          ` It read ${(() => { const m = new Set((p.excerpts || []).map(e => e.date + '|' + e.from + '|' + e.subject)).size || p.emails || 0,
+                                   dd = new Set((p.documents || []).map(x => x.file)).size;
+                               return `${m} email${m === 1 ? '' : 's'}` + (dd ? ` and ${dd} server document${dd === 1 ? '' : 's'}` : ''); })()}` +
           `${(p.notAdded || []).length ? `, and left out ${p.notAdded.length} item(s) it could not verify` : ''}.</div>` +
           (p.added ? `<div class="why"><b>New since Notion:</b> ${esc(p.added)}</div>` : '');
       })()}
       <table style="margin-top:6px"><tr><th>Latest deal</th><td>${para(p.latest)}</td></tr>
       <tr><th>History to add</th><td>${p.history ? para(p.history) : '<span class="none">No new entries</span>'}</td></tr>
-      <tr><th>Next steps</th><td>${para(p.next)}</td></tr></table>
+      <tr><th>Next steps</th><td>${(p.next || '').trim() ? staleMark(p.next) : para(p.next)}</td></tr></table>
       ${p.flags && p.flags.length ? `<div class="why" style="color:var(--warn)">To check before using: ${p.flags.map(esc).join(' · ')}</div>` : ''}
       ${p.notAdded && p.notAdded.length ? `<details style="margin-top:6px"><summary>Not added: ${p.notAdded.length} item(s) the agent could not verify in the emails</summary>
         <table>${p.notAdded.map(x => `<tr><th>${esc(x.kind)}</th><td>${esc(x.text)}<div class="why">${esc(x.reason)}</div></td></tr>`).join('')}</table></details>` : ''}
-      ${p.excerpts && p.excerpts.length ? `<details style="margin-top:6px"><summary>Sources: the ${p.excerpts.length} email excerpt(s) the labels refer to</summary>
+      ${p.excerpts && p.excerpts.length ? `<details style="margin-top:6px"><summary>Sources: ${(() => {
+          const topic = x => (x || '').replace(/^\s*((re|tr|fw|fwd|ref|aw|wg)\s*:\s*)+/i, '').trim().toLowerCase();
+          const ex = p.excerpts, mails = new Set(ex.map(e => e.date + '|' + e.from + '|' + e.subject)),
+                threads = new Set(ex.map(e => topic(e.subject))),
+                own = new Set((d.threads || []).map(t => topic(t.subject))),
+                matched = [...threads].filter(x => own.has(x)).length, other = threads.size - matched;
+          return `${mails.size} email${mails.size > 1 ? 's' : ''} read, from ${threads.size} thread${threads.size > 1 ? 's' : ''}` +
+                 (other ? ` (${matched} matched to this deal, ${other} other${other > 1 ? 's' : ''} that name the client)` : '');
+        })()}</summary>
+        <p class="meta" style="margin:4px 0">Each label (E1…) is an email the summary read. All emails of the matched threads are listed under "Email threads", below.</p>
         <table>${p.excerpts.map(e => `<tr><th>${esc(e.label)}</th><td>${esc(e.date)} · ${esc(e.from)} · ${esc(e.subject)}</td></tr>`).join('')}</table></details>` : ''}
       ${(() => {
         const files = new Map(); (p.documents || []).forEach(x => { const k = x.file; files.set(k, (files.get(k) || []).concat(x.label)); });
         return `<details style="margin-top:6px"><summary>How this summary was made</summary><table>
           <tr><th>Made</th><td>${esc(p.created)}</td></tr>
           <tr><th>Method</th><td>${esc(p.method || '')}</td></tr>
-          <tr><th>Emails read</th><td>${(p.excerpts || []).length || p.emails} excerpt(s)</td></tr>
+          <tr><th>Emails read</th><td>${new Set((p.excerpts || []).map(e => e.date + '|' + e.from + '|' + e.subject)).size || p.emails || 0}</td></tr>
           <tr><th>Documents read</th><td>${files.size ? [...files].map(([f, ls]) => esc(f) + ' <span class="meta">(' + ls.map(esc).join(', ') + ')</span>').join('<br>') : '<span class="none">none</span>'}</td></tr>
           <tr><th>Notion</th><td>Nothing sent: a proposal until approved</td></tr></table></details>`;
       })()}</div>` : '';
@@ -875,28 +904,23 @@ function show(id) {
     ${(() => {
       const best = d.threads.filter(t => t.best), alt = d.threads.filter(t => !t.best);
       const open = best.slice(0, DATA.maxOpen || 5), older = best.slice(DATA.maxOpen || 5);
-      let h = `<details class="sec"><summary>Email threads (${best.length})</summary>` + (open.map(threadCard).join('') || '<p class="none">No email threads matched.</p>');
+      const nMails = best.reduce((n, t) => n + (t.count || 0), 0);
+      let h = `<details class="sec"><summary>Email threads matched to this deal · ${best.length} thread${best.length === 1 ? '' : 's'} · ${nMails} email${nMails === 1 ? '' : 's'}</summary>` + (open.map(threadCard).join('') || '<p class="none">No email threads matched.</p>');
       if (older.length) h += `<details style="margin-top:6px"><summary>${older.length} older thread(s)</summary>` +
         older.map(t => `<div class="card"><strong>${esc(t.subject)}</strong> <span class="meta">${esc(t.last)} · ${t.count} email(s)</span><div class="why">Why this deal: ${esc(t.evidence.join('; '))}</div></div>`).join('') + '</details>';
       if (alt.length) h += `<p class="meta">Also possibly related: ${alt.length} thread(s), more likely about ` +
         [...new Map(alt.map(t => [t.topId, t])).values()].map(t => `<a href="#${encodeURIComponent(t.topId)}" onclick="show('${esc(t.topId)}');return false">${esc(t.topName)}</a>`).join(', ') + '.</p>';
       return h + '</details>';
     })()}
-    <details class="sec"><summary>Server documents · ${d.docs.filter(x => x.kind === 'about this deal').length} related · ${d.docs.filter(x => x.kind !== 'about this deal').length} mentioned</summary>
-    <p class="meta" style="margin:0 0 6px"><b>Related</b>: the file or folder name names the deal or its client (a term sheet, a mission note). <b>Mentioned</b>: the client only appears in the text (reports, newsletters).</p>
+    <details class="sec"><summary>Related server documents (${d.docs.length})</summary>
     ${(() => {
-      const card = x => `<div class="card"><strong>${esc(x.name)}</strong> <span class="meta">${esc(x.date)} · ${x.kind === 'about this deal' ? 'related' : 'mentioned'}${x.also.length ? ' · also as ' + esc(x.also.join(', ')) : ''}</span>
+      const card = x => `<div class="card"><strong>${esc(x.name)}</strong> <span class="meta">${esc(x.date)} · ${x.kind === 'about this deal' ? 'file named for this deal' : 'mentions the client'}${x.also.length ? ' · also as ' + esc(x.also.join(', ')) : ''}</span>
       ${x.link ? ` · <a class="srvopen" data-path="${esc(x.path || '')}" href="${esc(x.link)}" target="_blank" rel="noopener">open on the server</a><span class="srvmsg meta"></span>` : ''}
       ${x.path ? `<div class="why" title="Copy into File Explorer if the link does not open">${esc(x.path)}</div>` : ''}
       <div class="why">${esc(x.excerpt)}${x.excerpt.length >= 300 ? '…' : ''}</div></div>`;
       const own = d.docs.filter(x => x.kind === 'about this deal'), other = d.docs.filter(x => x.kind !== 'about this deal');
-      if (!own.length) {
-        // nothing filed under the deal's name: show the mentions directly, not behind another fold
-        return other.length ? `<p class="none">No related document yet. ${other.length} mentioned (reports, newsletters):</p>${other.map(card).join('')}`
-                            : '<p class="none">No related or mentioned server document yet.</p>';
-      }
-      return own.map(card).join('') +
-        (other.length ? `<details style="margin-top:6px"><summary>${other.length} mentioned (reports, newsletters)</summary>${other.map(card).join('')}</details>` : '');
+      const all = own.concat(other);        // one list: files named for the deal first, then those that mention the client
+      return all.length ? all.map(card).join('') : '<p class="none">No related server document yet.</p>';
     })()}</details>
     <details class="sec"><summary>Contacts (${d.contacts.length})</summary>
     ${d.contacts.map(c => `<div class="meta">${esc(c.name)}${c.job ? ' · ' + esc(c.job) : ''} · ${esc(c.email)}</div>`).join('') || '<p class="none">None in Notion.</p>'}</details>`;
