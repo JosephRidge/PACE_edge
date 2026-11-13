@@ -1,0 +1,13 @@
+{
+  "note": "CROSS search test run on 9 November 2026, as recorded in the project log; run eval_search.py again to replace it with a fresh report",
+  "when": "09/11/2026",
+  "db": "CROSS",
+  "n": 21,
+  "hit1": 57,
+  "hit5": 81,
+  "k": 10,
+  "hitk": 86,
+  "mrr": 0.67,
+  "search_s": 0.09,
+  "misses": ["Q05", "Q06", "Q07"]
+}

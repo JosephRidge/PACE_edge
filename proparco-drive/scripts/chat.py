@@ -15,6 +15,7 @@ How it works, all on this laptop:
 Nothing is sent outside the laptop (Notion is only read from the local directory file).
 """
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -719,7 +720,7 @@ def set_approval(cfg, project_id, action, checked=False):
                       approved_at, after_checking) VALUES (?,?,?,?,?,?)""", (project_id, r[2], r[0], who, at, 1 if flagged else 0))
         db.commit()
         print(f"  approved by {who}: {r[2]} (not sent to Notion)", flush=True)
-        return {"ok": True, "message": f"Approved by {who} at {at}.", "by": who, "at": at}
+        return {"ok": True, "message": f"Approved by {who} at {at}.", "by": who, "at": at, "checked": flagged}
     finally:
         db.close()
 
@@ -780,6 +781,37 @@ def full_source(cfg, deals, t, ident, db_label=""):
     return {"title": "Unknown source", "text": ""}
 
 
+# ================================================================ deal page: rebuild only when needed
+
+def page_code_signature():
+    """The deal page's code and settings, by CONTENT: an installed update keeps its original file
+    dates (unzip), so comparing dates alone would miss it."""
+    import hashlib
+    here = Path(__file__).resolve().parent
+    return hashlib.sha256(b"".join(f.read_bytes() for f in (here / "deals_view.py", here / "eval_view.py",
+                                                             here.parent / "config" / "settings.json") if f.exists())).hexdigest()
+
+
+def deals_page_current(cfg, page):
+    """True when the saved deal page is newer than everything it is built from: the email database
+    (summaries, approvals), the Notion copy and matches, the sector databases, the settings and the
+    page code. Then it is served as it is, instantly; otherwise it is rebuilt once."""
+    if not page.exists():
+        return False
+    sig = page.with_suffix(".code")
+    if not sig.exists() or sig.read_text().strip() != page_code_signature():
+        return False
+    d = cfg["_data_dir"]
+    inputs = [d / "db" / "proparco.db", d / "db" / "proparco.db-wal",
+              *sorted((d / "notion").glob("*.json")),
+              *[Path(p) for _, p in server_databases(cfg)],
+              Path(__file__).resolve().parent / "deals_view.py", Path(__file__).resolve().parent / "eval_view.py",
+              d / "eval" / "exports-snapshot.json",
+              Path(__file__).resolve().parent.parent / "config" / "settings.json"]
+    newest = max((p.stat().st_mtime for p in inputs if p.exists()), default=0)
+    return page.stat().st_mtime > newest
+
+
 # ================================================================ server
 
 def make_handler(cfg, eng, deals):
@@ -809,9 +841,14 @@ def make_handler(cfg, eng, deals):
                 # the deal page, rebuilt on each visit so it is always current, served from here so
                 # 'Chat' and 'Deals' are plain links on the same address
                 try:
-                    import deals_view
-                    out = deals_view.build(cfg, quiet=True)
-                    return self.send(200, Path(out).read_text(encoding="utf-8"), "text/html; charset=utf-8")
+                    out = cfg["_data_dir"] / "deals.html"
+                    if not deals_page_current(cfg, out):          # rebuild only when an input changed
+                        import deals_view
+                        t0 = time.time()
+                        out = Path(deals_view.build(cfg, quiet=True))
+                        out.with_suffix(".code").write_text(page_code_signature())
+                        print(f"  deal page rebuilt in {time.time() - t0:.1f}s", flush=True)
+                    return self.send(200, out.read_text(encoding="utf-8"), "text/html; charset=utf-8")
                 except BaseException as err:          # also SystemExit: never leave the browser empty
                     import traceback
                     detail = traceback.format_exc()
@@ -821,6 +858,23 @@ def make_handler(cfg, eng, deals):
                         print("  showing the last built deal page instead", flush=True)
                         return self.send(200, old.read_text(encoding="utf-8"), "text/html; charset=utf-8")
                     return self.send(500, f"Deal page not available: {err!r}\n\n{detail}", "text/plain; charset=utf-8")
+            if url.path == "/api/eval/refresh":
+                try:
+                    import eval_view
+                    return self.send(200, json.dumps(eval_view.start_refresh(cfg)), "application/json")
+                except Exception as err:
+                    return self.send(200, json.dumps({"state": "error", "error": str(err)[:200]}), "application/json")
+            if url.path == "/eval":
+                # the Evaluation page: read-only, in its own file, so a failure here never affects the rest
+                try:
+                    import eval_view
+                    embed = (urllib.parse.parse_qs(url.query).get("embed") or [""])[0] == "1"
+                    return self.send(200, eval_view.build(cfg, embed=embed), "text/html; charset=utf-8")
+                except BaseException as err:
+                    import traceback
+                    detail = traceback.format_exc()
+                    print("  evaluation page failed:\n" + detail, flush=True)
+                    return self.send(500, f"Evaluation page not available: {err!r}\n\n{detail}", "text/plain; charset=utf-8")
             if url.path == "/api/source":
                 qs = urllib.parse.parse_qs(url.query)
                 g = lambda k: (qs.get(k) or [""])[0]
@@ -914,8 +968,8 @@ def main():
             except OSError:
                 port += 1
         url = f"http://127.0.0.1:{port}"
-        print(f"Open {url}/deals  (this laptop only; the chat opens from the deal page)")
-        webbrowser.open(url + "/deals")
+        print(f"Open {url}/deals  (this laptop only; the chat opens from the deal page)", flush=True)
+        webbrowser.open(url + "/deals" + os.environ.get("PROPARCO_OPEN", ""))   # e.g. "#<deal id>" after a one-click summary
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

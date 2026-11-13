@@ -11,6 +11,7 @@ next to the assistant's latest proposal from the emails; the matched email threa
 reasons for the match); related server documents; contacts. Read-only: nothing is sent anywhere.
 """
 import argparse
+import glob
 import html
 import json
 import re
@@ -137,6 +138,23 @@ def server_db(cfg):
         return Path(published)
     local = cfg["_data_dir"] / "db" / "server.db"
     return local if local.exists() else None
+
+
+def mailbox_label(cfg):
+    """Whose mailbox the page shows: the data folder's name and the mailbox's own address, taken from
+    the export (each email's folder path starts with it, e.g. omondid@afd.fr\\Inbox). Read-only."""
+    import collections
+    name = cfg["_data_dir"].name
+    stores = collections.Counter()
+    for f in sorted(glob.glob(str(cfg["_data_dir"] / "acquisitions" / "*" / "acquisition.json")))[:3]:
+        try:
+            for m in json.loads(Path(f).read_text(encoding="utf-8-sig")).get("messages") or []:
+                top = re.split(r"[\\/]", m.get("folderPath") or "", maxsplit=1)[0]
+                if "@" in top:
+                    stores[top] += 1
+        except Exception:
+            continue
+    return {"name": name, "email": stores.most_common(1)[0][0] if stores else ""}
 
 
 def doc_link(cfg, body):
@@ -440,7 +458,27 @@ def build(cfg, include_all=False, quiet=False):
               "senders": t["senders"][:3], "unknown": m.get("unknown_addresses", [])[:4]}
              for m, t in sorted(unmatched, key=lambda mt: mt[1]["last"], reverse=True)]
 
-    page = PAGE.replace("__DATA__", json.dumps({"deals": items, "loose": loose, "maxOpen": MAX_OPEN_THREADS}, ensure_ascii=False)
+    extracts = None
+    try:                                   # the Info list: from the export snapshot, if one was taken
+        import eval_view as EV
+        snap = EV.load_snapshot(cfg)
+        if snap:
+            allm = EV.mail_scope(cfg) == "all"
+            extracts = {"made": snap.get("made", ""), "all": allm,
+                        "mail": [{"name": m["name"], "emails": m.get("exported"), "complete": str(m.get("verdict", "")).startswith("ALL"),
+                                  "error": bool(m.get("error"))} for m in snap.get("mail", []) if allm or EV.is_own(cfg, m["path"])],
+                        "hidden": sum(1 for m in snap.get("mail", []) if not (allm or EV.is_own(cfg, m["path"]))),
+                        "sectors": [{"name": x["name"], "docs": x.get("docs"), "indexed": bool(x.get("indexed"))} for x in snap.get("sectors", [])]}
+    except Exception:
+        extracts = None
+    try:
+        who = mailbox_label(cfg)
+    except Exception:
+        who = {"name": cfg["_data_dir"].name, "email": ""}
+    who_html = (f'<span class="who" title="The mailbox this page shows (set when the app starts)">'
+                f'<span class="dot"></span>Mailbox: {html.escape(who["name"])}'
+                + (f' · {html.escape(who["email"])}' if who["email"] else "") + "</span>")
+    page = PAGE.replace("__WHO__", who_html).replace("__DATA__", json.dumps({"deals": items, "loose": loose, "maxOpen": MAX_OPEN_THREADS, "extracts": extracts}, ensure_ascii=False)
                         .replace("</", "<\\/"))
     page = page.replace("__BUILT__", esc(f"Built {datetime.now():%d/%m/%Y %H:%M} · Notion synced "
                                          f"{d.get('synced_at', '?')[:16].replace('T', ' ')} · "
@@ -468,12 +506,29 @@ PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 --line:#2c383e;--accent:#6cc3d6;--good:#6fd29c;--warn:#f0b35a;--chip:#24313a}}
 *{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;
 background:var(--bg);color:var(--ink)}
-header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+html,body{height:100%}body{display:flex;flex-direction:column}
+header{padding:24px 20px 12px;border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+header .spacer{flex:1}
+.who{display:inline-flex;align-items:center;gap:7px;background:#fff;color:#1d2b33;border:1px solid #cfd8dc;border-radius:999px;padding:4px 12px;font-size:13px;font-weight:600;cursor:default;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.who .dot{width:8px;height:8px;border-radius:50%;background:#2f9e44}.menubtn{font:inherit;font-size:20px;line-height:1;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:5px 10px;cursor:pointer}
 h1{font-size:19px;margin:0}input[type=search]{padding:7px 10px;border:1px solid var(--line);
 border-radius:8px;background:var(--panel);color:var(--ink);min-width:260px}
-label{color:var(--muted);font-size:14px}.built{color:var(--muted);font-size:13px;width:100%}
-main{display:grid;grid-template-columns:340px 1fr;height:calc(100vh - 92px)}
-nav{border-right:1px solid var(--line);overflow:auto}nav button{display:block;width:100%;text-align:left;
+label{color:var(--muted);font-size:14px}.built{color:var(--muted);font-size:13px}
+main{display:grid;grid-template-columns:340px 1fr;flex:1;min-height:0;transition:grid-template-columns .2s ease}
+body.collapsed main{grid-template-columns:0 1fr}body.collapsed #side{visibility:hidden}
+#side{min-height:0;border-right:1px solid var(--line);overflow-y:auto}
+details.sec2{border-bottom:1px solid var(--line)}details.sec2>summary{cursor:pointer;padding:10px 14px;font-weight:700;font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);list-style-position:inside}
+details.sec2[open]>summary{border-bottom:1px solid var(--line)}
+#side .nav2 .evp{font-weight:400;padding-left:26px;font-size:14px}
+#info{padding:6px 0 10px}#info .ih{padding:8px 14px 4px;font-size:12.5px;font-weight:700;color:var(--muted)}
+#info button{display:block;width:100%;text-align:left;padding:6px 14px;border:0;background:transparent;color:var(--ink);font:inherit;font-size:14px;cursor:pointer}
+#info button:hover{background:var(--chip)}#info .m2{color:var(--muted);font-size:12.5px}#info .ok2{color:#2f9e44}#info .fl2{color:#c2410c}#info .note{padding:4px 14px;font-size:12.5px;color:var(--muted)}
+#side .filters{padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+#side .filters input[type=search]{min-width:0;width:100%}#side .filters label{display:flex;flex-direction:column;gap:3px}
+#side .filters select{width:100%}#side .nav2 button{display:block;width:100%;text-align:left;padding:9px 14px;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer;font:inherit;font-weight:600}
+#side .nav2 button[aria-current=true]{background:var(--chip);box-shadow:inset 3px 0 var(--accent)}
+nav{overflow:visible}
+#detail iframe.evalframe{width:100%;height:100%;border:0;display:block}#detail.fill{padding:0;overflow:hidden}nav button{display:block;width:100%;text-align:left;
 padding:10px 14px;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer}
 nav button[aria-current=true]{background:var(--chip);box-shadow:inset 3px 0 var(--accent)}
 nav .n{font-weight:600}nav .m{font-size:13px;color:var(--muted)}
@@ -515,16 +570,30 @@ details.sec{margin-top:14px;border-top:1px solid #8883;padding-top:8px}details.s
 .upd .updtitle{display:inline-block;background:#fff4e6;color:#d9480f;border:1px solid #ffa94d;border-radius:8px;padding:3px 10px}@media (prefers-color-scheme:dark){.upd .updtitle{background:#3b2410;color:#ffa94d}}.upd .action{margin:8px 0 10px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}button.approve{font:inherit;font-weight:700;border:0;border-radius:9px;padding:8px 16px;background:#2f9e44;color:#fff;cursor:pointer}button.approve:disabled{background:#adb5bd;cursor:default}.upd .approved{color:#2f9e44;font-weight:600}.upd .approved a{margin-left:8px;font-weight:400}
 .approvebtn{display:inline-block;font:inherit;font-weight:600;font-size:13px;padding:4px 12px;border-radius:8px;border:1px solid #2f9e44;background:transparent;color:#2f9e44;cursor:pointer}.approvebtn:hover:not(:disabled){background:#2f9e44;color:#fff}.approvebtn:disabled{border-color:#adb5bd;color:#adb5bd;cursor:default}.upd .chk{display:flex;gap:6px;align-items:center;font-size:13px}
 </style></head><body>
-<header><h1>Deals: emails and documents</h1>
-<input type="search" id="q" placeholder="Search: deal, project ID, counterparty, contact, email subject…">
+<header><button id="menuBtn" class="menubtn" title="Show or hide the deal list" aria-label="Menu">&#9776;</button>
+<h1>Deals: emails and documents</h1>__WHO__<span class="spacer"></span>
+<a id="chatLink" class="chatbtn" href="http://127.0.0.1:8765/" title="Ask questions across emails and documents">Chat &rarr;</a>
+</header>
+<main><aside id="side">
+<details class="sec2" id="secFilters" open><summary>Filters</summary>
+<div class="filters">
+<input type="search" id="q" placeholder="Search: deal, project ID, counterparty, contact…">
 <label>Show <select id="fShow" autocomplete="off"><option value="summary">deals with an agent summary</option>
 <option value="mail">deals with emails</option><option value="all">all deals</option></select></label>
 <label>Sector <select id="fSector" autocomplete="off"><option value="">all sectors</option></select></label>
 <label>Projects <select id="fProj" autocomplete="off"><option value="">all deals</option>
 <option value="with">with a project ID</option><option value="without">without a project ID</option></select></label>
-<a id="chatLink" class="chatbtn" href="http://127.0.0.1:8765/" title="Ask questions across emails and documents">Chat &rarr;</a>
-<span class="meta" id="count"></span><div class="built">__BUILT__</div></header>
-<main><nav id="list"></nav><section id="detail"></section></main>
+<span class="meta" id="count"></span><div class="built">__BUILT__</div>
+</div></details>
+<details class="sec2" id="secDeals" open><summary>Deals</summary><nav id="list"></nav></details>
+<details class="sec2" id="secEval" style="display:none"><summary>Evaluation</summary>
+<div class="nav2"><button id="evalNav" aria-current="false">Open the evaluation</button>
+<button class="evp" data-p="p1">Search quality</button><button class="evp" data-p="p2">Deal summaries</button>
+<button class="evp" data-p="p3">Approvals</button><button class="evp" data-p="p4">Chat answers</button>
+<button class="evp" data-p="p5">Coverage</button><button class="evp" data-p="p6">Email exports</button>
+<button class="evp" data-p="p7">Server extraction</button></div></details>
+<details class="sec2" id="secInfo"><summary>Info: extracts</summary><div id="info"></div></details>
+</aside><section id="detail"></section></main>
 <script>
 const DATA = __DATA__;
 const $ = id => document.getElementById(id);
@@ -599,7 +668,14 @@ document.addEventListener('click', async e => {
   const q = {deal: b.dataset.deal, action: b.dataset.action}; if (b.dataset.checked) q.checked = '1';
   const r = await (await fetch('/api/approve?' + new URLSearchParams(q))).json();
   if (!r.ok) { alert(r.message); return; }
-  location.reload();
+  // update only this deal, in place: no reload, no rebuild, the reader stays where they are
+  const d = DATA.deals.find(x => x.id === b.dataset.deal);
+  if (d && d.proposal) {
+    d.proposal.approval = b.dataset.action === 'undo' ? null : {by: r.by, at: r.at, checked: !!r.checked, current: true};
+    const box = $('detail'), y = box.scrollTop, wy = window.scrollY;
+    show(d.id);
+    box.scrollTop = y; window.scrollTo(0, wy);
+  } else location.reload();
 });
 document.addEventListener('change', e => {
   const c = e.target.closest('.checked-box'); if (!c) return;
@@ -651,6 +727,7 @@ function renderList() {
     + (DATA.loose.length ? `<button data-id="__loose" aria-current="${current === '__loose'}"><div class="n">Emails without a deal</div>
        <div class="m">${DATA.loose.length} thread(s): attach later</div></button>` : '');
   $('list').querySelectorAll('button').forEach(b => b.onclick = () => show(b.dataset.id));
+  if (current === '__eval') return;          // the Evaluation view stays open while filtering
   if (current) show(current); else if (shown.length) show(shown[0].id);
 }
 function statusHtml(st) {
@@ -710,7 +787,8 @@ function threadCard(t) {
       </details>` : ''}</div>`;
 }
 function show(id) {
-  current = id;
+  current = id; $('detail').classList.remove('fill');
+  if ($('evalNav')) $('evalNav').setAttribute('aria-current', 'false');
   $('list').querySelectorAll('button').forEach(b => b.setAttribute('aria-current', b.dataset.id === id));
   if (id === '__loose') {
     $('detail').innerHTML = `<h2>Emails without a deal</h2><p class="meta">No contact, domain or name linked these threads to a Notion deal.</p>` +
@@ -800,8 +878,44 @@ function show(id) {
 }
 $('fShow').value = DATA.deals.some(d => d.hasSummary) ? 'summary' : 'mail'; $('q').value = '';
 $('chatLink').href = CHAT;
+// the menu button folds the side panel (filters and deal list) away; the choice is remembered
+try { if (localStorage.getItem('dealsSide') === 'closed') document.body.classList.add('collapsed'); } catch (e) {}
+// each section of the side panel remembers whether it is open
+['secFilters', 'secDeals', 'secEval', 'secInfo'].forEach(id => {
+  try { const v = localStorage.getItem('side_' + id); if (v) $(id).open = v === 'open'; } catch (e) {}
+  $(id).addEventListener('toggle', () => { try { localStorage.setItem('side_' + id, $(id).open ? 'open' : 'closed'); } catch (e) {} });
+});
+// Info: every extract, from the export snapshot (mailboxes by the privacy rule; all sectors)
+(function renderInfo() {
+  const X = DATA.extracts, live = location.protocol.startsWith('http');
+  if (!X) { $('info').innerHTML = '<div class="note">No export snapshot yet: open Evaluation › Email exports and refresh.</div>'; return; }
+  const item = (p, html) => live ? `<button data-p="${p}">${html}</button>` : `<div style="padding:6px 14px">${html}</div>`;
+  $('info').innerHTML = `<div class="ih">Email exports${X.all ? '' : ' (this mailbox)'}</div>` +
+    (X.mail.map(m => item('p6', `<b>${esc(m.name)}</b> <span class="m2">· ${m.error ? 'unreadable' : (m.emails || 0).toLocaleString() + ' emails'}</span>
+      <span class="${m.complete ? 'ok2' : 'fl2'}">${m.complete ? '✓ complete' : '· with exceptions'}</span>`)).join('') ||
+     '<div class="note">This mailbox\'s own export is not in this folder.</div>') +
+    (X.hidden ? `<div class="note">${X.hidden} other mailbox export(s) not shown.</div>` : '') +
+    `<div class="ih">Server sectors</div>` +
+    (X.sectors.map(s => item('p7', `<b>${esc(s.name)}</b> <span class="m2">· ${(s.docs || 0).toLocaleString()} documents</span>
+      <span class="${s.indexed ? 'ok2' : 'fl2'}">${s.indexed ? '· indexed' : '· not indexed here'}</span>`)).join('') || '<div class="note">None found.</div>') +
+    `<div class="note">Snapshot of ${esc(X.made)}</div>`;
+  $('info').querySelectorAll('button[data-p]').forEach(b => b.onclick = () => showEval(b.dataset.p));
+})();
+$('menuBtn').onclick = () => { const c = document.body.classList.toggle('collapsed');
+  try { localStorage.setItem('dealsSide', c ? 'closed' : 'open'); } catch (e) {} };
+// Evaluation shown inside the interface, in the main area (when served by the app)
+function showEval(panel) {
+  current = '__eval'; $('detail').classList.add('fill');
+  $('detail').innerHTML = '<iframe class="evalframe" src="/eval?embed=1' + (panel ? '#' + panel : '') + '" title="Evaluation"></iframe>';
+  $('list').querySelectorAll('button').forEach(b => b.setAttribute('aria-current', 'false'));
+  $('evalNav').setAttribute('aria-current', 'true');
+  history.replaceState(null, '', '#evaluation');
+}
 // the chat in a panel on this page (when served by the chat program); opened as a file, links go to the chat page
 if (location.protocol.startsWith('http')) {
+  $('secEval').style.display = '';
+  $('evalNav').onclick = () => showEval();
+  document.querySelectorAll('#secEval .evp').forEach(b => b.onclick = () => showEval(b.dataset.p));
   const panel = document.createElement('div'); panel.id = 'chatpanel';
   panel.innerHTML = '<div class="bar"><b id="chattitle">Ask about a deal</b><a id="chatfull" href="/" target="_blank">open full page &#8599;</a>' +
                     '<span class="x" id="chatclose" title="Close">&times;</span></div><iframe id="chatframe" title="Chat"></iframe>';
@@ -824,6 +938,7 @@ const wanted = decodeURIComponent(location.hash.slice(1));
 if (wanted && (wanted === '__loose' || DATA.deals.some(d => d.id === wanted))) current = wanted;
 ['q', 'fShow', 'fSector', 'fProj'].forEach(id => ['input', 'change'].forEach(ev => $(id).addEventListener(ev, () => { current = null; renderList(); })));
 renderList();
+if (wanted === 'evaluation' && location.protocol.startsWith('http')) showEval();   // a reload keeps the Evaluation view
 </script></body></html>"""
 
 

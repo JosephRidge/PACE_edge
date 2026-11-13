@@ -45,5 +45,6 @@
     ]
   },
   "server_db_dir": "/home/josephridge/proparco-work/sectors",
-  "sdrive_link_base": "S:\\Proparco"
+  "sdrive_link_base": "S:\\Proparco",
+  "eval_mail_scope": "all"
 }

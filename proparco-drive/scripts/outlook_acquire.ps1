@@ -246,13 +246,42 @@ function Test-DiskFull {
     } catch { return $false }
 }
 
+# ---------------------------------------------------------------- connection to Outlook
+# "RPC server unavailable" and friends: Outlook closed, restarted, or stopped answering (a very
+# large folder, a sleeping laptop, a network drop to Exchange). Instead of logging every remaining
+# item as failed, wait, reconnect, find the same folder again and continue from the same item.
+$ConnLost = '800706BA|800706BE|80010108|80010001|8001010A|RPC'
+$script:ReconnectWaits = @(10, 30, 60)       # seconds before each reconnection attempt
+$script:reconnects = 0
+function Test-ConnLost($err) { return ("$($err.Exception.Message)" -match $ConnLost) }
+function Connect-Outlook {
+    if ($script:ConnectHook) { return (& $script:ConnectHook) }     # tests
+    return (New-Object -ComObject Outlook.Application)
+}
+function Restore-Folder([string]$fid, [string]$sid, [string]$path) {
+    foreach ($w in $script:ReconnectWaits) {
+        Write-Host "    Outlook stopped responding in $path; waiting $w s, then reconnecting ..."
+        Start-Sleep -Seconds $w
+        try {
+            $script:outlook = Connect-Outlook
+            $f = $script:outlook.GetNamespace("MAPI").GetFolderFromID($fid, $sid)
+            if ($f) { $script:reconnects++; Write-Host "    reconnected: continuing $path"; return $f }
+        } catch {}
+    }
+    return $null
+}
+
 # ---------------------------------------------------------------- export
 
 $script:exported = @{}
+$script:syncIssues = 0; $script:currentRow = $null; $script:lostAt = ""
 function Export-Folder($folder, [string]$label, [string]$path) {
     # One row of the reconciliation: Outlook's own count against what happened to each item.
     $row = [ordered]@{ folder = $path; items = 0; exported = 0; alreadyExported = 0; olderThanLimit = 0
-                       failed = 0; notExportedCap = 0 }
+                       failed = 0; notExportedCap = 0; notReached = 0 }
+    $script:currentRow = $row          # kept if the export stops inside this folder
+    $fid = [string](P { $folder.EntryID }); $sid = [string](P { $folder.StoreID })
+    if (-not $sid) { $sid = [string](P { $folder.Store.StoreID }) }
     $items = $folder.Items
     $row.items = [int](P { $items.Count })
     if ($DaysBack -gt 0) {
@@ -264,9 +293,24 @@ function Export-Folder($folder, [string]$label, [string]$path) {
     for ($i = 1; $i -le $row.items; $i++) {
         $m = $null
         try { $m = Get-At $items $i } catch {
-            $row.failed++
-            [void]$script:failures.Add("$path`titem $i of $($row.items) could not be opened: $($_.Exception.Message)`t")
-            continue
+            if ((Test-ConnLost $_) -and -not $Selected -and $fid) {
+                $nf = Restore-Folder $fid $sid $path
+                if ($nf) {
+                    $folder = $nf; $items = $folder.Items
+                    if ($DaysBack -gt 0) { try { $items.Sort($field, $true) } catch {} }
+                    try { $m = Get-At $items $i } catch { $m = $null }
+                }
+                if (-not $m) {
+                    # Outlook did not come back: stop here; the rest is "not reached", not "failed"
+                    $row.notReached = $row.items - $i + 1
+                    $script:lostAt = "$path, item $i of $($row.items)"
+                    throw "OUTLOOKLOST"
+                }
+            } else {
+                $row.failed++
+                [void]$script:failures.Add("$path`titem $i of $($row.items) could not be opened: $($_.Exception.Message)`t")
+                continue
+            }
         }
         if ($i % 250 -eq 0 -and $row.items -gt 0) {
             $rate = $i / [math]::Max(1, ((Get-Date) - $t0).TotalSeconds)
@@ -286,21 +330,32 @@ function Export-Folder($folder, [string]$label, [string]$path) {
         if ($mid -and $script:exported.ContainsKey("mid:" + $mid)) { $row.alreadyExported++; if ($id) { $script:exported[$id] = $true }; continue }
         try {
             try { $rec = Convert-Item $m $label $path }
-            catch { Start-Sleep -Seconds 2; $script:retried++; $rec = Convert-Item $m $label $path }   # one retry: transient Outlook errors
+            catch {
+                if ((Test-ConnLost $_) -and $id -and -not $Selected) {
+                    $nf = Restore-Folder $fid $sid $path
+                    if (-not $nf) { $row.notReached = $row.items - $i + 1; $script:lostAt = "$path, item $i of $($row.items)"; throw "OUTLOOKLOST" }
+                    $folder = $nf; $items = $folder.Items
+                    if ($DaysBack -gt 0) { try { $items.Sort($field, $true) } catch {} }
+                    $m = $script:outlook.GetNamespace("MAPI").GetItemFromID($id, $sid)
+                } else { Start-Sleep -Seconds 2 }
+                $script:retried++; $rec = Convert-Item $m $label $path     # one retry: transient Outlook errors
+            }
             [void]$script:messages.Add($rec)
             if ($id) { $script:exported[$id] = $true }
             if ($mid) { $script:exported["mid:" + $mid] = $true }
             $script:threads[$rec.conversationId] = $true
             $script:total++; $row.exported++
         } catch {
+            if ("$($_.Exception.Message)" -eq "OUTLOOKLOST") { throw }
             $row.failed++
             [void]$script:failures.Add("$path`t$($_.Exception.Message)`t$(P { $m.Subject })")
         }
         if ($script:messages.Count -ge $PartSize) {
             Save-Part
-            if (Test-DiskFull) { throw "DISKFULL" }
+            if (Test-DiskFull) { $row.notReached = $row.items - $i; throw "DISKFULL" }
         }
     }
+    $script:currentRow = $null
     return $row
 }
 
@@ -327,10 +382,21 @@ function Get-Targets($ns) {
     foreach ($cur in $roots) {
       if ($cur) {
         $sentId = P { $cur.Store.GetDefaultFolder(5).EntryID }
+        $syncId = P { $cur.Store.GetDefaultFolder(20).EntryID }      # olFolderSyncIssues
         $walk = New-Object System.Collections.Stack
         $walk.Push(@($cur, [string](P { $cur.Name })))
         while ($walk.Count -gt 0) {
             $pair = $walk.Pop(); $f = $pair[0]; $path = $pair[1]
+            # Outlook's own sync-problem logs ("Sync Issues": conflicts, local and server failures):
+            # not the person's mail, so not exported, but counted, because they show the mailbox on
+            # this laptop may not match the server
+            $fname = [string](P { $f.Name })
+            if (($syncId -and (P { $f.EntryID }) -eq $syncId) -or $fname -match '^(Sync Issues|Probl.mes de synchronisation)') {
+                $n = [int](P { $f.Items.Count }); $subs = $null; try { $subs = $f.Folders } catch {}
+                for ($k = 1; $k -le (Get-N $subs); $k++) { try { $n += [int](P { (Get-At $subs $k).Items.Count }) } catch {} }
+                $script:syncIssues += $n
+                continue
+            }
             $isMail = ((P { $f.DefaultItemType }) -eq 0)
             $label = $(if ($sentId -and (P { $f.EntryID }) -eq $sentId) { "SentMail" } else { "Inbox" })
             if ($isMail) { $targets += ,@($f, $label, $path) }
@@ -391,8 +457,12 @@ function Invoke-Export {
             }
         }
     } catch {
-        if ("$($_.Exception.Message)" -eq "DISKFULL") { $stopped = "disk nearly full (under $MinFreeGB GB free)" }
+        $msg = "$($_.Exception.Message)"
+        if ($msg -eq "DISKFULL") { $stopped = "disk nearly full (under $MinFreeGB GB free)"; $again = "free some space and run again to continue" }
+        elseif ($msg -eq "OUTLOOKLOST") { $stopped = "the connection to Outlook was lost at $($script:lostAt) and did not come back after $($script:ReconnectWaits.Count) attempts"
+                                          $again = "check that classic Outlook is open and responding, keep the laptop awake and on power, then run again to continue" }
         else { throw }
+        if ($script:currentRow) { $rows += $script:currentRow; $script:currentRow = $null }
     }
     Save-Part
     if (Test-Path $script:RunDir) {        # the empty part opened after the last save
@@ -407,12 +477,13 @@ function Invoke-Export {
         [System.IO.File]::WriteAllText((Join-Path $LogDir "mail-failed-$stamp.txt"),
             "folder`treason`tsubject`r`n" + (@($script:failures) + @($script:unreadable | ForEach-Object { "(not readable)`t$_`t" }) -join "`r`n"), $utf8)
     }
-    $sum = @{ items = 0; exported = 0; already = 0; older = 0; failed = 0; cap = 0 }
+    $sum = @{ items = 0; exported = 0; already = 0; older = 0; failed = 0; cap = 0; notReached = 0 }
     foreach ($r in $rows) {
         $sum.items += $r.items; $sum.exported += $r.exported; $sum.already += $r.alreadyExported
         $sum.older += $r.olderThanLimit; $sum.failed += $r.failed; $sum.cap += $r.notExportedCap
+        $sum.notReached += [int]$r.notReached
     }
-    $accounted = $sum.exported + $sum.already + $sum.older + $sum.failed + $sum.cap
+    $accounted = $sum.exported + $sum.already + $sum.older + $sum.failed + $sum.cap + $sum.notReached
 
     Write-Host ""
     Write-Host ("Folders: {0} | items in Outlook: {1:N0} | exported now: {2:N0} | already exported: {3:N0} | failed: {4:N0}" -f `
@@ -429,8 +500,15 @@ function Invoke-Export {
     }
     if ($script:noBody) { Write-Host "Items exported with no readable body (often encrypted or rights-protected): $($script:noBody)." }
     if ($script:retried) { Write-Host "Items that needed a second try: $($script:retried)." }
+    if ($script:reconnects) { Write-Host "Outlook stopped responding and was reconnected $($script:reconnects) time(s); the export continued where it was." }
+    if ($sum.notReached) { Write-Host ("Not reached yet: {0:N0} item(s); a new run continues from where this one stopped." -f $sum.notReached) }
+    if ($script:syncIssues) {
+        Write-Host ("Outlook's sync-problem folder holds {0:N0} item(s) (not exported: Outlook's own logs). Outlook had trouble" -f $script:syncIssues)
+        Write-Host "  syncing with the server, so this laptop may not hold the whole mailbox. In Outlook: right-click a folder >"
+        Write-Host "  Properties > Synchronization, and compare 'Server folder contains' with 'Offline folder contains'."
+    }
     if ($stopped) {
-        Write-Host "STOPPED: $stopped. Everything saved so far is kept; free some space and run again to continue."
+        Write-Host "STOPPED: $stopped. Everything saved so far is kept; $again."
     } elseif ($script:unreadable.Count) {
         Write-Host "ACCOUNTED FOR WITH EXCEPTIONS: $($script:unreadable.Count) mailbox(es)/folder(s) could not be read (listed above), $($sum.failed) item(s) failed."
     } elseif ($accounted -ne $sum.items) {

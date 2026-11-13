@@ -54,7 +54,8 @@ try {
             $st = $coll.Item($k)
             $name = [string]$st.DisplayName
             $type = $(try { [int]$st.ExchangeStoreType } catch { 3 })
-            $stores += [pscustomobject]@{ Name = $name; Public = ($type -eq 2)
+            $cachedMode = $(try { [bool]$st.IsCachedExchange } catch { $false })
+            $stores += [pscustomobject]@{ Name = $name; Public = ($type -eq 2); Cached = $cachedMode
                 Kind = $(switch ($type) { 0 { "mailbox" } 1 { "other person's mailbox" } 2 { "public folders" }
                                           3 { "data file (.pst)" } default { "archive / additional mailbox" } }) }
         } catch { $bad += "entry $k of ${count}: $($_.Exception.Message)" }
@@ -74,6 +75,13 @@ if ($bad) {
 for ($i = 0; $i -lt $stores.Count; $i++) {
     Write-Host ("  {0}. {1}   ({2}){3}" -f ($i + 1), $stores[$i].Name, $stores[$i].Kind, $(if ($stores[$i].Public) { "  - not exported unless chosen" } else { "" }))
 }
+# ---------------------------------------------------------------- checks before exporting
+$checks = Join-Path $PSScriptRoot "scripts\mail_checks.ps1"
+if (Test-Path $checks) {
+    . $checks
+    $warn = Get-ExportWarnings $stores (Get-SyncWindowMonths)
+    if ($warn.Count) { Write-Host ""; $warn | ForEach-Object { Write-Host $_ -ForegroundColor Yellow } }
+}
 $default = @($stores | Where-Object { -not $_.Public })
 $answer = Read-Host "`nPress Enter to export all of these except public folders, or type the numbers to export (e.g. 1,2)"
 if ($answer.Trim()) {
@@ -81,6 +89,13 @@ if ($answer.Trim()) {
                 Where-Object { $_ -ge 0 -and $_ -lt $stores.Count } | ForEach-Object { $stores[$_] })
 } else { $picked = $default }
 if (-not $picked) { Write-Host "Nothing chosen. Nothing was exported."; [void][Win32.Power]::SetThreadExecutionState([uint32]"0x80000000"); exit 1 }
+if ((Get-Command Test-OwnMailboxMissing -ErrorAction SilentlyContinue) -and (Test-OwnMailboxMissing $stores $picked)) {
+    Write-Host "`nYour own mailbox is NOT in this choice (only: $(($picked | ForEach-Object { $_.Name }) -join ' | '))." -ForegroundColor Yellow
+    if ((Read-Host "Export anyway without it? Type Y to continue, or press Enter to stop and choose again") -notmatch '^[yYoO]') {
+        Write-Host "Stopped. Run this again and press Enter at the list to export everything."
+        [void][Win32.Power]::SetThreadExecutionState([uint32]"0x80000000"); exit 1
+    }
+}
 Write-Host "`nExporting: $(($picked | ForEach-Object { $_.Name }) -join ' | ')"
 Write-Host "Large mailboxes take hours; progress is shown below. Keep this window and Outlook open.`n"
 

@@ -45,7 +45,9 @@ MINISTRAL_GGUF = "Ministral-3-3B-Instruct-2512-Q4_K_M.gguf"
 EMBED_GGUF = "bge-m3-q8.gguf"
 SCRIPTS = ["engine.py", "embed.py", "generate.py", "verify.py", "obs.py", "search.py",
            "eval.py", "menu.py", "viewer.py", "gmail_acquire.py", "outlook_acquire.ps1",
-           "autorun.py"]
+           "autorun.py", "drive_acquire.py", "embcheck.py", "verify_models.py", "publish.py",
+           "notion_client.py", "notion_schema.py", "notion_sync.py", "notion_match.py",
+           "deal_summarize.py", "deals_view.py", "summarize_selected.py"]
 
 
 def step(msg):
@@ -102,6 +104,10 @@ def pip_target(target, platform_tag, python_version=None):
                                                                  python_version]
     print("   " + " ".join(cmd[2:]))
     subprocess.run(cmd, check=True)
+    # PDF text reader for S-drive documents (pure Python, works on both systems)
+    pdf = [sys.executable, "-m", "pip", "install", "--quiet", "--target", str(target),
+           "--no-deps", "pypdf==5.1.0"]
+    subprocess.run(pdf, check=True)
 
 
 def write_settings(src_settings, dst_settings, data_on_drive=True):
@@ -220,10 +226,18 @@ def main():
     print("   all present")
 
     step("Scripts, launchers and config")
-    for s in SCRIPTS:
-        copy(SRC / "scripts" / s, drive / "scripts" / s)
+    # every current script (the fixed list above is only the minimum that must exist), plus the
+    # evaluation question sets
+    for f in sorted(p for p in (SRC / "scripts").iterdir() if p.suffix in (".py", ".ps1") and p.is_file()):
+        copy(f, drive / "scripts" / f.name)
+    if (SRC / "scripts" / "eval").is_dir():
+        shutil.copytree(SRC / "scripts" / "eval", drive / "scripts" / "eval", dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        print("   copied scripts/eval/")
     for f in ("start.sh", "start.bat", "advanced-menu.bat", "advanced-menu.sh", "demo.bat", "demo.sh",
-              "README.md", "SETUP.md"):
+              "full-run.bat", "full-run.sh", "s-drive.bat", "s-drive.sh", "s-drive-inventory.bat", "s-drive-inventory.sh",
+              "summarize-selected.bat", "overnight.ps1", "plan_split.ps1", "extract_sector.ps1", "run_extraction.ps1",
+              "extract_mail.ps1", "README.md", "SETUP.md"):
         if (SRC / f).exists():
             copy(SRC / f, drive / f)
     (drive / "start.sh").chmod(0o755)
