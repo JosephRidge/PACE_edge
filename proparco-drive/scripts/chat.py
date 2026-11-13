@@ -524,7 +524,7 @@ $('histbtn').onclick = openHistory; $('histclose').onclick = () => $('hist').cla
 $('hist').addEventListener('click', e => { if (e.target.id === 'hist') $('hist').classList.remove('open'); });
 // a soft two-tone beep when an answer is complete (on by default; the choice is remembered)
 let soundOn = true; try { soundOn = localStorage.getItem('chatSound') !== 'off'; } catch (e) {}
-const showSound = () => $('sound').textContent = soundOn ? '🔔 Sound on' : '🔕 Sound off';
+const showSound = () => $('sound').textContent = soundOn ? 'Sound on' : 'Sound off';
 showSound(); $('sound').onclick = () => { soundOn = !soundOn; try { localStorage.setItem('chatSound', soundOn ? 'on' : 'off'); } catch (e) {} showSound(); };
 let audio = null;
 function beep() {
