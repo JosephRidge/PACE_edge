@@ -75,6 +75,7 @@ def read_box(box):
         for k, v in re.findall(r"(Folders|items in Outlook|exported now|already exported|failed):\s*([^|\n]*)", line[-1]):
             counts[k] = num(v)
     verdict = (re.findall(r"(ALL ITEMS ACCOUNTED FOR|ACCOUNTED FOR WITH EXCEPTIONS|STOPPED[^\n]*)", log) or ["no verdict: export not finished?"])[-1]
+    sync = re.findall(r"sync-problem folder holds ([\d,\s\u00a0?]+) item", log)
     unreadable = re.findall(r"could not be read[^\n]*\n((?:\s+[^\n]+\n){1,6})", log, re.I)
     fails, reasons, first_fail = collections.Counter(), collections.Counter(), {}
     for ff in glob.glob(os.path.join(box, "logs", "mail-failed-*.txt")):
@@ -94,7 +95,7 @@ def read_box(box):
     return {"box": box, "name": Path(box).name if Path(box).name not in ("proparco-data",) else Path(box).parent.name,
             "n": n, "oldest": dates[0] if dates else "", "newest": dates[-1] if dates else "",
             "months": months, "stores": stores, "exported_on": exported_on, "counts": counts, "verdict": verdict,
-            "unreadable": [u.strip() for u in unreadable], "fails": fails, "reasons": reasons, "first_fail": first_fail}
+            "unreadable": [u.strip() for u in unreadable], "syncIssues": num(sync[-1]) if sync else 0, "fails": fails, "reasons": reasons, "first_fail": first_fail}
 
 
 def diagnose(b):
@@ -105,6 +106,9 @@ def diagnose(b):
         where = "; ".join(f"{f} from item {i:,} of {t:,}" for f, (i, t) in list(b["first_fail"].items())[:3])
         out.append(("bad", f"Connection to Outlook lost during the export ({b['reasons']['connection to Outlook lost']:,} items not read: {where}).",
                     "Re-run the export with the laptop on power, sleep off, Outlook open and untouched: it skips what was done and retries only these."))
+    if "connection to Outlook was lost" in b["verdict"] or ("STOPPED" in b["verdict"] and "Outlook" in b["verdict"]):
+        out.append(("bad", "The export stopped cleanly because Outlook stopped responding; everything before that point is saved.",
+                    "Reopen Outlook, keep the laptop on power and awake, and run the export again: it continues from where it stopped."))
     other = [r for r in b["reasons"] if r != "connection to Outlook lost"]
     if other:
         out.append(("warn", "Other read errors: " + ", ".join(f"{r} ({b['reasons'][r]:,})" for r in other[:4]) + ".",
@@ -137,6 +141,9 @@ def diagnose(b):
             elif prev and sum(prev) > 0 and recent and max(prev) < recent / 6:
                 out.append(("warn", "Older years are thin compared with the last two: older mail is probably in an archive that was not included.",
                             "In Outlook, look for 'Online Archive' or old .pst files; open or expand them, then re-run and check they are in the list."))
+    if b.get("syncIssues"):
+        out.append(("warn", f"Outlook logged {b['syncIssues']:,} sync problem(s) on this laptop: the mailbox here may not match the server.",
+                    "In Outlook, right-click a folder > Properties > Synchronization: compare 'Server folder contains' with 'Offline folder contains'."))
     if b["unreadable"]:
         out.append(("warn", "Mailboxes or folders Outlook could not open: " + " | ".join(b["unreadable"])[:200],
                     "Usually shared or delegated mailboxes without access; fine to leave out unless they matter."))

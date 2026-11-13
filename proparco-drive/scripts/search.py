@@ -100,7 +100,7 @@ def main():
                 JOIN messages m ON m.entry_id = c.entry_id
                 WHERE v.embedding MATCH ? AND k = ?
                 ORDER BY v.distance""", (q, args.k * 4)).fetchall()
-            rows = dedupe(rows, args.k) if is_docs else rows[:args.k]
+            rows = dedupe(rows, args.k) if is_docs else [dict(r) for r in rows[:args.k]]   # plain dicts, like documents
             label = kind[:-1] if kind == "emails" else kind
             print(f"\n=== Top {len(rows)} {label} chunks from {path.name} "
                   f"(similarity: 1.00 = identical meaning) ===")
