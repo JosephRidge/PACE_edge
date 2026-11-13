@@ -141,20 +141,37 @@ def server_db(cfg):
 
 
 def mailbox_label(cfg):
-    """Whose mailbox the page shows: the data folder's name and the mailbox's own address, taken from
-    the export (each email's folder path starts with it, e.g. omondid@afd.fr\\Inbox). Read-only."""
+    """Whose mailbox the page shows, from the export itself (read-only):
+      - the address: the one that appears most often among the RECIPIENTS of the exported emails
+        (an Inbox's emails are addressed to its owner), with the display name written beside it;
+      - otherwise the Windows user who ran the export (manifest), then the data folder's name.
+    The Outlook store name is not used: on another laptop it can be a shared or old mailbox."""
     import collections
-    name = cfg["_data_dir"].name
-    stores = collections.Counter()
-    for f in sorted(glob.glob(str(cfg["_data_dir"] / "acquisitions" / "*" / "acquisition.json")))[:3]:
+    addr, names = collections.Counter(), collections.defaultdict(collections.Counter)
+    users = collections.Counter()
+    runs = sorted(glob.glob(str(cfg["_data_dir"] / "acquisitions" / "*" / "acquisition.json")), key=os.path.getmtime)[-5:]
+    for f in runs:
+        try:
+            man = json.loads((Path(f).parent / "manifest.json").read_text(encoding="utf-8-sig"))
+            if man.get("initiatedBy"):
+                users[man["initiatedBy"]] += 1
+        except Exception:
+            pass
         try:
             for m in json.loads(Path(f).read_text(encoding="utf-8-sig")).get("messages") or []:
-                top = re.split(r"[\\/]", m.get("folderPath") or "", maxsplit=1)[0]
-                if "@" in top:
-                    stores[top] += 1
+                for r in (m.get("to") or []) + (m.get("cc") or []):
+                    mm = re.match(r"\s*(.*?)\s*<\s*([^<>\s]+@[^<>\s]+)\s*>", str(r))
+                    e, n = (mm.group(2).lower(), mm.group(1).strip('" ')) if mm else ((str(r).strip().lower(), "") if "@" in str(r) else ("", ""))
+                    if e:
+                        addr[e] += 1
+                        if n:
+                            names[e][n] += 1
         except Exception:
             continue
-    return {"name": name, "email": stores.most_common(1)[0][0] if stores else ""}
+    email = addr.most_common(1)[0][0] if addr else ""
+    name = (names[email].most_common(1)[0][0] if email and names[email] else "") or \
+           (users.most_common(1)[0][0] if users else "") or cfg["_data_dir"].name
+    return {"name": name, "email": email}
 
 
 def doc_link(cfg, body):
@@ -677,6 +694,16 @@ document.addEventListener('click', async e => {
     box.scrollTop = y; window.scrollTo(0, wy);
   } else location.reload();
 });
+// browsers block file:// links from a web page: ask the local app to open the file with Windows
+document.addEventListener('click', async e => {
+  const a = e.target.closest('a.srvopen'); if (!a || !location.protocol.startsWith('http') || !a.dataset.path) return;
+  e.preventDefault();
+  const msg = a.nextElementSibling; if (msg) msg.textContent = ' opening…';
+  try {
+    const r = await (await fetch('/api/open?' + new URLSearchParams({path: a.dataset.path}))).json();
+    if (msg) msg.textContent = ' ' + r.message;
+  } catch (err) { if (msg) msg.textContent = ' could not ask the app to open it'; }
+});
 document.addEventListener('change', e => {
   const c = e.target.closest('.checked-box'); if (!c) return;
   const b = c.closest('.action').querySelector('.approvebtn'); if (b) b.disabled = !c.checked;
@@ -859,7 +886,7 @@ function show(id) {
     <p class="meta" style="margin:0 0 6px"><b>Related</b>: the file or folder name names the deal or its client (a term sheet, a mission note). <b>Mentioned</b>: the client only appears in the text (reports, newsletters).</p>
     ${(() => {
       const card = x => `<div class="card"><strong>${esc(x.name)}</strong> <span class="meta">${esc(x.date)} · ${x.kind === 'about this deal' ? 'related' : 'mentioned'}${x.also.length ? ' · also as ' + esc(x.also.join(', ')) : ''}</span>
-      ${x.link ? ` · <a href="${esc(x.link)}" target="_blank" rel="noopener">open on the server</a>` : ''}
+      ${x.link ? ` · <a class="srvopen" data-path="${esc(x.path || '')}" href="${esc(x.link)}" target="_blank" rel="noopener">open on the server</a><span class="srvmsg meta"></span>` : ''}
       ${x.path ? `<div class="why" title="Copy into File Explorer if the link does not open">${esc(x.path)}</div>` : ''}
       <div class="why">${esc(x.excerpt)}${x.excerpt.length >= 300 ? '…' : ''}</div></div>`;
       const own = d.docs.filter(x => x.kind === 'about this deal'), other = d.docs.filter(x => x.kind !== 'about this deal');

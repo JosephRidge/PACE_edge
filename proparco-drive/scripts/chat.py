@@ -441,7 +441,7 @@ function showSources(i, label) {
       box.textContent = 'Loading…';
       const r = await (await fetch('/api/source?' + new URLSearchParams({t: s.ref.t, id: s.ref.id || '', db: s.ref.db || ''}))).json();
       box.dataset.loaded = 1;
-      box.innerHTML = (r.link ? `<div class="acts"><a href="${esc(r.link)}" target="_blank" rel="noopener">${esc(r.linkText || 'Open')}</a>${r.path ? `<span class="note">${esc(r.path)}</span>` : ''}</div>` : '') +
+      box.innerHTML = (r.link ? `<div class="acts"><a ${r.path ? `class="srvopen" data-path="${esc(r.path)}"` : ''} href="${esc(r.link)}" target="_blank" rel="noopener">${esc(r.linkText || 'Open')}</a>${r.path ? `<span class="note">${esc(r.path)}</span>` : ''}</div>` : '') +
         `<div>${esc(r.text || '')}</div>` + (r.note ? `<div class="note">${esc(r.note)}</div>` : '');
     }
     m.textContent = card.classList.contains('open') ? 'Hide' : (s.ref.t === 'thread' ? 'Show the whole thread' : s.ref.t === 'doc' ? 'Show the full document' : s.ref.t === 'notion' ? 'Show the full Notion record' : 'Show the full email');
@@ -489,6 +489,13 @@ $('newc').onclick = async () => {
   await fetch('/api/history/new?' + new URLSearchParams({deal: currentDeal})); clearThread();
 };
 $('srcbtn').onclick = () => $('side').classList.toggle('open');
+document.addEventListener('click', async e => {            // server documents: opened by the local app
+  const a = e.target.closest('a.srvopen'); if (!a || !a.dataset.path) return;
+  e.preventDefault();
+  const note = a.parentElement.querySelector('.note'); const was = note ? note.textContent : '';
+  try { const r = await (await fetch('/api/open?' + new URLSearchParams({path: a.dataset.path}))).json();
+        if (note) note.textContent = r.message; } catch (err) { if (note) note.textContent = 'could not ask the app to open it'; }
+});
 // ---- conversation history: current (one per deal) and archived (read-only, restorable)
 const dealLabel = (id, name) => name || (DEALS.find(x => x.id === id) || {}).name || (id ? 'Deal ' + id.slice(0, 8) : 'General (no deal)');
 async function openHistory() {
@@ -725,6 +732,23 @@ def set_approval(cfg, project_id, action, checked=False):
         db.close()
 
 
+# ================================================================ open a server file (local app)
+
+def open_server_file(cfg, path):
+    """Browsers will not follow file:// links from a web page, so the page asks this local app to open
+    the original with the computer's own program. Only files under the S: drive base are opened."""
+    base = (cfg.get("sdrive_link_base") or "S:\\Proparco").replace("/", "\\").rstrip("\\")
+    p = (path or "").replace("/", "\\")
+    if not p.lower().startswith(base.lower() + "\\") or ".." in p.split("\\"):
+        return {"ok": False, "message": "Only files on the Proparco server can be opened from here."}
+    if os.name != "nt":
+        return {"ok": False, "message": "Opens on a Windows laptop connected to the S: drive. Path: " + p}
+    if not os.path.exists(p):
+        return {"ok": False, "message": "Not reachable from this computer: connect to the Proparco network (S: drive), then try again."}
+    os.startfile(p)
+    return {"ok": True, "message": "opened in its program."}
+
+
 # ================================================================ full source, on demand
 
 def full_source(cfg, deals, t, ident, db_label=""):
@@ -858,6 +882,12 @@ def make_handler(cfg, eng, deals):
                         print("  showing the last built deal page instead", flush=True)
                         return self.send(200, old.read_text(encoding="utf-8"), "text/html; charset=utf-8")
                     return self.send(500, f"Deal page not available: {err!r}\n\n{detail}", "text/plain; charset=utf-8")
+            if url.path == "/api/open":
+                p = (urllib.parse.parse_qs(url.query).get("path") or [""])[0]
+                try:
+                    return self.send(200, json.dumps(open_server_file(cfg, p)), "application/json")
+                except Exception as err:
+                    return self.send(200, json.dumps({"ok": False, "message": f"Could not open: {err}"}), "application/json")
             if url.path == "/api/eval/refresh":
                 try:
                     import eval_view
