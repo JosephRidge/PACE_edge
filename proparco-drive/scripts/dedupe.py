@@ -38,7 +38,11 @@ Removal is reversible:
     (then run embed.py to index restored emails again).
 """
 import argparse
+import collections
+import csv
 import hashlib
+import io
+import zipfile
 import html
 import json
 import re
@@ -217,6 +221,32 @@ def when(r):
         return None
 
 
+# ================================================================ mailbox overview
+
+def overview(recs, now=None):
+    """What the export holds: period, emails per year, per mailbox/archive (own vs shared), and how
+    much is older than 1, 3 and 5 years. For information only: what to keep or archive is the
+    owner's decision, so no action is attached to age."""
+    now = now or datetime.now()
+    years, stores, ages = collections.Counter(), collections.Counter(), {"1": 0, "3": 0, "5": 0}
+    dates = []
+    for r in recs:
+        stores[(r["folder"] or "?").split("\\")[0] or "?"] += 1
+        d = when(r)
+        if d:
+            dates.append(d)
+            years[d.year] += 1
+            age = (now - d).days / 365.25
+            for k in ages:
+                if age > int(k):
+                    ages[k] += 1
+    dates.sort()
+    return {"emails": len(recs), "oldest": dates[0].strftime("%d/%m/%Y") if dates else "",
+            "newest": dates[-1].strftime("%d/%m/%Y") if dates else "",
+            "years": [[y, years[y]] for y in sorted(years)], "stores": stores.most_common(8),
+            "olderThan": ages, "attachments": sum(r["attachments"] for r in recs)}
+
+
 # ================================================================ finding duplicates
 
 class Groups:
@@ -387,9 +417,51 @@ class Store:
         applied_ids = {a["id"] for a in self.state.get("applied", [])}
         self.state["groups"] = [x for x in groups if x["id"] not in applied_ids]
         self.state["stats"] = dict(stats, emails=len(recs))
+        self.state["overview"] = overview(recs)
         self.state["scanned"] = datetime.now().isoformat(timespec="seconds")
         self.save()
         return self.state
+
+    # ---------------------------------------------------------------- backup and clean-up list
+    def backup(self):
+        """Zip the exported emails (acquisition.json, manifests, removal records, review state)
+        into dedupe/backups/. Attachments are not copied: removal never deletes them (they move to
+        quarantine and come back on Restore)."""
+        out = self.dir / "backups"
+        out.mkdir(parents=True, exist_ok=True)
+        z = out / f"exports-{datetime.now():%Y%m%d-%H%M%S}.zip"
+        k = 2
+        while z.exists():                                  # never overwrite an earlier backup
+            z = out / f"exports-{datetime.now():%Y%m%d-%H%M%S}-{k}.zip"
+            k += 1
+        n = 0
+        with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted((self.data / "acquisitions").glob("*/*.json")):
+                zf.write(f, f.relative_to(self.data))
+                n += 1
+            if self.state_path.exists():
+                zf.write(self.state_path, self.state_path.relative_to(self.data))
+        self.state["lastBackup"] = {"file": str(z), "at": datetime.now().isoformat(timespec="seconds"),
+                                    "files": n, "mb": round(z.stat().st_size / 1e6, 1)}
+        self.save()
+        return {"ok": True, "message": f"Backup saved: {z} ({n} files, {z.stat().st_size / 1e6:.1f} MB)."}
+
+    def cleanup_csv(self):
+        """Every duplicate group still to review, one row per copy, for the owner to find and handle
+        in Outlook himself if he chooses. Outlook is never changed by this program."""
+        kinds = {1: "same email", 2: "identical", 3: "near-duplicate", 4: "same attachments"}
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["group", "kind", "similarity", "proposal", "received", "from", "folder", "subject",
+                    "attachments", "why this copy"])
+        for g in self.state.get("groups", []):
+            for m in g["members"]:
+                w.writerow([g["id"], kinds.get(g["tier"], g["tier"]), g.get("similarity", ""),
+                            "keep" if m["key"] == g["keep"] else "duplicate",
+                            (m.get("received") or "")[:16].replace("T", " "), m.get("sender", ""),
+                            m.get("folder", ""), m.get("subject", ""), m.get("attachments", 0),
+                            kinds.get(m.get("link", g["tier"]), "")])
+        return "\ufeff" + buf.getvalue()            # BOM so Excel opens accents correctly
 
     # ---------------------------------------------------------------- index (proparco.db)
     def _db(self):
@@ -473,6 +545,10 @@ class Store:
             todo = [(groups[g], k) for g, k in decisions.items() if g in groups]
             if not todo:
                 return {"ok": False, "message": "Nothing selected."}
+            lb = (self.state.get("lastBackup") or {}).get("at")
+            auto = ""
+            if not lb or (datetime.now() - datetime.fromisoformat(lb)).total_seconds() > 3600:
+                auto = self.backup()["message"] + " "
             db, backup = self._db()
             removed_emails = removed_chunks = 0
             try:
@@ -502,7 +578,7 @@ class Store:
             applied = {g["id"] for g, _ in todo}
             self.state["groups"] = [x for x in self.state["groups"] if x["id"] not in applied]
             self.save()
-            msg = f"Removed {removed_emails} duplicate email(s) from the exported copies"
+            msg = auto + f"Removed {removed_emails} duplicate email(s) from the exported copies"
             msg += f" and {removed_chunks} indexed piece(s); index backup: {backup.name}." if backup else \
                 " (no index found in this data folder)."
             return {"ok": True, "message": msg}
@@ -538,7 +614,7 @@ class Store:
 # ================================================================ review page
 
 PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Duplicate emails</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Mailbox review</title>
 <style>
 :root{--bg:#f7f7f5;--card:#fff;--ink:#1d1d1b;--mute:#6b6b66;--line:#e2e1dc;--keep:#2f9e44;--drop:#c92a2a;
 --t1:#1971c2;--t2:#6741d9;--t3:#e8590c;--t4:#0c8599;--hi:#fff3bf}
@@ -552,14 +628,16 @@ button.primary{background:var(--drop);color:#fff;border-color:var(--drop)}button
 main{padding:16px 20px;max-width:1300px;margin:auto}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;margin:0 0 14px;padding:12px 14px}
 .badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:20px;color:#fff;margin-right:6px}
 .t1{background:var(--t1)}.t2{background:var(--t2)}.t3{background:var(--t3)}.t4{background:var(--t4)}
-#att{display:none}#att.open{display:block}.small{font-size:13px}
+#att,#ov{display:none}#att.open,#ov.open{display:block}.small{font-size:13px}
+.yr{display:flex;align-items:end;gap:3px;height:70px;margin:6px 0}.yr div{background:var(--t1);width:22px;border-radius:3px 3px 0 0}
+.yl{display:flex;gap:3px;font-size:10px;color:var(--mute)}.yl span{width:22px;text-align:center}
 table{width:100%;border-collapse:collapse;margin-top:8px;font-size:14px}td,th{text-align:left;padding:5px 6px;border-top:1px solid var(--line);vertical-align:top}
 tr.keep td{background:color-mix(in srgb,var(--keep) 10%,transparent)}tr.drop td{color:var(--mute);text-decoration:line-through}
 .prev{display:none;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-top:8px}.prev.open{display:grid}
 .prev div{border:1px solid var(--line);border-radius:7px;padding:8px;font-size:13px;max-height:220px;overflow:auto;white-space:pre-wrap}
 #msg{margin-top:8px;font-weight:600}.empty{padding:40px;text-align:center}
 </style></head><body>
-<header><h1>Duplicate emails &mdash; exported copies and index only (Outlook is never touched)</h1>
+<header><h1>Mailbox review &mdash; exported copies only (Outlook is never changed)</h1>
 <div class="mute" id="sum"></div>
 <div class="row" style="margin-top:8px">
  <label>Show <select id="flt"><option value="0">all kinds</option><option value="1">1 · same email</option>
@@ -569,7 +647,11 @@ tr.keep td{background:color-mix(in srgb,var(--keep) 10%,transparent)}tr.drop td{
  <button onclick="selNone()">Select none</button>
  <button class="primary" id="apply" onclick="apply()">Remove duplicates in selected groups</button>
  <button onclick="rescan()">Scan again</button><button onclick="showApplied()">Removed groups / restore</button>
- <button id="attbtn" onclick="document.getElementById('att').classList.toggle('open')" style="display:none">Attachment report</button></div>
+ <button id="attbtn" onclick="document.getElementById('att').classList.toggle('open')" style="display:none">Attachment report</button>
+ <button onclick="document.getElementById('ov').classList.toggle('open')">Mailbox overview</button>
+ <button onclick="backup()">Back up the exports</button>
+ <a href="api/cleanup.csv"><button>Clean-up list (CSV)</button></a></div>
+<div id="ov" class="card small"></div>
 <div id="att" class="card small"></div>
 <div id="msg"></div></header><main id="list"></main>
 <script>
@@ -584,7 +666,17 @@ function attPanel(){const a=S.attachments,b=document.getElementById("attbtn"),p=
   (a.notFound?` · ${a.notFound.toLocaleString()} not found on this machine`:"")+
   `<table><tr><th>Most circulated documents</th><th>In emails</th><th>Size</th></tr>`+
   a.top.map(t=>`<tr><td>${esc(t.name)}</td><td>${t.emails}</td><td>${mb(t.size)}</td></tr>`).join("")+`</table>`}
-function render(){attPanel();const f=+document.getElementById("flt").value,L=document.getElementById("list");
+function ovPanel(){const o=S.overview,p=document.getElementById("ov");if(!o){p.innerHTML="Scan again to see the overview.";return}
+ const top=Math.max(1,...o.years.map(y=>y[1])),lb=S.lastBackup;
+ p.innerHTML=`<b>${o.emails.toLocaleString()} emails</b> from ${esc(o.oldest)} to ${esc(o.newest)} · ${o.attachments.toLocaleString()} attachments`+
+  `<div class="yr">${o.years.map(y=>`<div title="${y[0]}: ${y[1].toLocaleString()}" style="height:${Math.max(2,64*y[1]/top)}px"></div>`).join("")}</div>`+
+  `<div class="yl">${o.years.map(y=>`<span>${String(y[0]).slice(2)}</span>`).join("")}</div>`+
+  `<div style="margin-top:6px"><b>By mailbox:</b> ${o.stores.map(s=>esc(s[0])+" ("+s[1].toLocaleString()+")").join(" · ")}</div>`+
+  `<div><b>Older than 1 year:</b> ${o.olderThan["1"].toLocaleString()} · <b>3 years:</b> ${o.olderThan["3"].toLocaleString()} · <b>5 years:</b> ${o.olderThan["5"].toLocaleString()}`+
+  ` <span class="mute">(for information: what to keep or archive is the owner's decision)</span></div>`+
+  `<div class="mute">${lb?`Last backup: ${esc(lb.at.replace("T"," "))}, ${lb.files} files, ${lb.mb} MB`:"No backup yet: one is made automatically before the first removal."}</div>`}
+async function backup(){msg("Backing up ...");const r=await (await fetch("api/backup",{method:"POST"})).json();msg(r.message,!r.ok);await load()}
+function render(){attPanel();ovPanel();const f=+document.getElementById("flt").value,L=document.getElementById("list");
  const gs=S.groups.filter(g=>!f||g.tier===f);const st=S.stats||{};
  const rm=S.groups.reduce((n,g)=>n+g.members.length-1,0);
  document.getElementById("sum").textContent=`${S.groups.length} group(s) to review, ${rm} removable copies, in ${st.emails??"?"} exported emails`+
@@ -630,10 +722,12 @@ def serve(store, port):
         def log_message(self, *a):
             pass
 
-        def _send(self, code, body, ctype="application/json"):
+        def _send(self, code, body, ctype="application/json", filename=None):
             data = body.encode("utf-8") if isinstance(body, str) else body
             self.send_response(code)
             self.send_header("Content-Type", ctype + "; charset=utf-8")
+            if filename:
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -643,6 +737,9 @@ def serve(store, port):
                 return self._send(200, PAGE, "text/html")
             if self.path == "/api/state":
                 return self._send(200, json.dumps(store.state, ensure_ascii=False))
+            if self.path == "/api/cleanup.csv":
+                return self._send(200, store.cleanup_csv(), "text/csv",
+                                  filename=f"cleanup-list-{datetime.now():%Y%m%d}.csv")
             self._send(404, "{}")
 
         def do_POST(self):
@@ -651,6 +748,8 @@ def serve(store, port):
             try:
                 if self.path == "/api/apply":
                     return self._send(200, json.dumps(store.apply(body)))
+                if self.path == "/api/backup":
+                    return self._send(200, json.dumps(store.backup()))
                 if self.path == "/api/restore":
                     return self._send(200, json.dumps(store.restore(body.get("id"))))
                 if self.path == "/api/scan":

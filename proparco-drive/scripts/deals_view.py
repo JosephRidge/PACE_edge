@@ -496,27 +496,56 @@ border:1px solid var(--accent);color:var(--accent);text-decoration:none;font-wei
 .stage-lead{--stc:#8a5ad6}.stage-inactive{--stc:#9aa8af}
 @media (prefers-color-scheme:dark){.stage-early{--stc:#f0b35a}.stage-loi{--stc:#7fa8ff}.stage-formal{--stc:#6cc3d6}
 .stage-signed{--stc:#6fd29c}.stage-lead{--stc:#b99cff}}
+#chatpanel{position:fixed;top:0;right:0;height:100%;width:min(820px,96vw);background:var(--bg,#fff);box-shadow:-6px 0 24px rgba(0,0,0,.25);
+  transform:translateX(105%);transition:transform .2s ease;z-index:50;display:flex;flex-direction:column}
+#chatpanel.open{transform:none}#chatpanel .bar{display:flex;align-items:center;gap:12px;padding:8px 12px;border-bottom:1px solid #8884}
+#chatpanel .bar b{flex:1}#chatpanel iframe{flex:1;border:0;width:100%}#chatpanel .x{cursor:pointer;font-size:20px;line-height:1;padding:0 6px}
+.chatbtn{display:inline-block;margin-left:10px;padding:4px 12px;border-radius:8px;border:1px solid currentColor;text-decoration:none;font-weight:600;font-size:13px}
+details.sec{margin-top:14px;border-top:1px solid #8883;padding-top:8px}details.sec>summary{font-weight:700;font-size:15px;cursor:pointer;list-style-position:outside}details.sec[open]>summary{margin-bottom:6px}
 </style></head><body>
 <header><h1>Deals: emails and documents</h1>
-<input type="search" id="q" placeholder="Search deals, counterparties, contacts">
+<input type="search" id="q" placeholder="Search: deal, project ID, counterparty, contact, email subject…">
 <label>Show <select id="fShow" autocomplete="off"><option value="summary">deals with an agent summary</option>
 <option value="mail">deals with emails</option><option value="all">all deals</option></select></label>
+<label>Sector <select id="fSector" autocomplete="off"><option value="">all sectors</option></select></label>
+<label>Projects <select id="fProj" autocomplete="off"><option value="">all deals</option>
+<option value="with">with a project ID</option><option value="without">without a project ID</option></select></label>
+<a id="chatLink" class="chatbtn" href="http://127.0.0.1:8765/" title="Ask questions across emails and documents">Chat &rarr;</a>
 <span class="meta" id="count"></span><div class="built">__BUILT__</div></header>
 <main><nav id="list"></nav><section id="detail"></section></main>
 <script>
 const DATA = __DATA__;
 const $ = id => document.getElementById(id);
+// served by the chat program (http): links stay on the same address; opened as a file: the chat's usual address
+const CHAT = location.protocol.startsWith('http') ? '/' : 'http://127.0.0.1:8765/';
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const para = s => (s && s.trim()) ? esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>') : '<span class="none">(empty)</span>';
 let current = null;
 function items() {
   const q = $('q').value.toLowerCase().trim();
-  const mode = $('fShow').value;
-  const list = DATA.deals.filter(d => mode === 'all' || (mode === 'mail' ? d.hasEmails : d.hasSummary))
+  const mode = $('fShow').value, sector = $('fSector').value;
+  const inMode = d => mode === 'all' || (mode === 'mail' ? d.hasEmails : d.hasSummary);
+  // sector options: counted within the current "Show" choice, so the numbers match the list
+  const counts = {};
+  DATA.deals.filter(inMode).forEach(d => (d.team.length ? d.team : ['(not set)']).forEach(t => counts[t] = (counts[t] || 0) + 1));
+  const sel = $('fSector'), keep = sel.value;
+  sel.innerHTML = `<option value="">all sectors (${DATA.deals.filter(inMode).length})</option>` +
+    Object.keys(counts).sort().map(t => `<option value="${esc(t)}">${esc(t)} (${counts[t]})</option>`).join('');
+  sel.value = counts[keep] ? keep : '';
+  const proj = $('fProj').value, hasPid = d => !!(d.projectId && String(d.projectId).trim());
+  const list = DATA.deals.filter(d => inMode(d) && (!sel.value || (d.team.length ? d.team : ['(not set)']).includes(sel.value))
+      && (!proj || (proj === 'with' ? hasPid(d) : !hasPid(d))))
     .sort((a, b) => (b.hasSummary - a.hasSummary) || (b.summaryChanged - a.summaryChanged));
   if (!q) return list;
-  return list.filter(d => [d.name, d.status, ...d.counterparties, ...d.contacts.map(c => c.name + ' ' + c.email),
-     ...d.threads.map(t => t.subject)].join(' ').toLowerCase().includes(q));
+  // every word typed must match: name, project ID, status, sector, country, counterparties, contacts,
+  // email subjects and the agent summary
+  const words = q.split(/\s+/).filter(Boolean);
+  return list.filter(d => {
+    const hay = [d.name, d.projectId, d.status, ...(d.team || []), ...(d.countries || []), ...d.counterparties,
+      ...d.contacts.map(c => c.name + ' ' + c.email), ...d.threads.map(t => t.subject),
+      d.proposal && d.proposal.latest].filter(Boolean).join(' ').toLowerCase();
+    return words.every(w => hay.includes(w));
+  });
 }
 function renderList() {
   const shown = items();
@@ -602,7 +631,6 @@ function show(id) {
   const st = d.agent || {state: 'none'};
   const dealCard = (p && p.kind === 'deal') ? `<div class="card"><strong>Agent summary for the deal</strong>
       ${p.review ? ' <span class="badge rev">needs review</span>' : ' <span class="badge">proposal, not yet approved</span>'}
-      <span class="meta"> ${esc(p.created)} · method: ${esc(p.method || '')} · ${p.emails} email excerpt(s)${p.documents.length ? ' and documents: ' + p.documents.map(x => esc(x.label + ' ' + x.file)).join(', ') : ''}</span>
       ${(() => {
         const f = p.found || {}, n = (p.excerpts || []).length, parts = [];
         if (p.added) parts.push('a new fact for the description');
@@ -622,7 +650,16 @@ function show(id) {
       ${p.notAdded && p.notAdded.length ? `<details style="margin-top:6px"><summary>Not added: ${p.notAdded.length} item(s) the agent could not verify in the emails</summary>
         <table>${p.notAdded.map(x => `<tr><th>${esc(x.kind)}</th><td>${esc(x.text)}<div class="why">${esc(x.reason)}</div></td></tr>`).join('')}</table></details>` : ''}
       ${p.excerpts && p.excerpts.length ? `<details style="margin-top:6px"><summary>Sources: the ${p.excerpts.length} email excerpt(s) the labels refer to</summary>
-        <table>${p.excerpts.map(e => `<tr><th>${esc(e.label)}</th><td>${esc(e.date)} · ${esc(e.from)} · ${esc(e.subject)}</td></tr>`).join('')}</table></details>` : ''}</div>` : '';
+        <table>${p.excerpts.map(e => `<tr><th>${esc(e.label)}</th><td>${esc(e.date)} · ${esc(e.from)} · ${esc(e.subject)}</td></tr>`).join('')}</table></details>` : ''}
+      ${(() => {
+        const files = new Map(); (p.documents || []).forEach(x => { const k = x.file; files.set(k, (files.get(k) || []).concat(x.label)); });
+        return `<details style="margin-top:6px"><summary>How this summary was made</summary><table>
+          <tr><th>Made</th><td>${esc(p.created)}</td></tr>
+          <tr><th>Method</th><td>${esc(p.method || '')}</td></tr>
+          <tr><th>Emails read</th><td>${(p.excerpts || []).length || p.emails} excerpt(s)</td></tr>
+          <tr><th>Documents read</th><td>${files.size ? [...files].map(([f, ls]) => esc(f) + ' <span class="meta">(' + ls.map(esc).join(', ') + ')</span>').join('<br>') : '<span class="none">none</span>'}</td></tr>
+          <tr><th>Notion</th><td>Nothing sent: a proposal until approved</td></tr></table></details>`;
+      })()}</div>` : '';
   $('detail').innerHTML = `<div class="dealhead"><h2>${esc(d.name)}</h2>
       ${d.url ? `<a class="notion-btn" href="${esc(d.url)}" target="_blank" rel="noopener">Open in Notion &#8599;</a>` : ''}</div>
     <div class="facts">
@@ -632,38 +669,66 @@ function show(id) {
       <div class="fact"><span class="k">Location${d.countries.length > 1 ? 's' : ''}</span><span class="v">${d.countries.length ? pills(d.countries) : '<span class="unset">not set</span>'}</span></div>
     </div>
     ${d.counterparties.length ? `<div class="cps"><span class="k">Counterparties</span>${pills(d.counterparties)}</div>` : ''}
-    <p class="meta">Read-only view: nothing has been sent to Notion. Updating Notion will happen only after approval.</p>
+    <p class="meta">Read-only view: nothing has been sent to Notion. Updating Notion will happen only after approval.
+      <a class="chatbtn askdeal" data-deal="${esc(d.id)}" data-name="${esc(d.name)}" href="${CHAT}?deal=${encodeURIComponent(d.id)}">Ask about this deal &rarr;</a></p>
     ${dealCard}
     ${st.state === 'running' ? `<div style="margin-top:8px">${statusHtml(st)}</div>` : ''}
     ${(() => {
       const best = d.threads.filter(t => t.best), alt = d.threads.filter(t => !t.best);
       const open = best.slice(0, DATA.maxOpen || 5), older = best.slice(DATA.maxOpen || 5);
-      let h = `<h3>Email threads (${best.length})</h3>` + (open.map(threadCard).join('') || '<p class="none">No email threads matched.</p>');
+      let h = `<details class="sec"><summary>Email threads (${best.length})</summary>` + (open.map(threadCard).join('') || '<p class="none">No email threads matched.</p>');
       if (older.length) h += `<details style="margin-top:6px"><summary>${older.length} older thread(s)</summary>` +
         older.map(t => `<div class="card"><strong>${esc(t.subject)}</strong> <span class="meta">${esc(t.last)} · ${t.count} email(s)</span><div class="why">Why this deal: ${esc(t.evidence.join('; '))}</div></div>`).join('') + '</details>';
       if (alt.length) h += `<p class="meta">Also possibly related: ${alt.length} thread(s), more likely about ` +
         [...new Map(alt.map(t => [t.topId, t])).values()].map(t => `<a href="#${encodeURIComponent(t.topId)}" onclick="show('${esc(t.topId)}');return false">${esc(t.topName)}</a>`).join(', ') + '.</p>';
-      return h;
+      return h + '</details>';
     })()}
-    <h3>Server documents (${d.docs.filter(x => x.kind === 'about this deal').length})</h3>
+    <details class="sec"><summary>Server documents · ${d.docs.filter(x => x.kind === 'about this deal').length} related · ${d.docs.filter(x => x.kind !== 'about this deal').length} mentioned</summary>
+    <p class="meta" style="margin:0 0 6px"><b>Related</b>: the file or folder name names the deal or its client (a term sheet, a mission note). <b>Mentioned</b>: the client only appears in the text (reports, newsletters).</p>
     ${(() => {
-      const card = x => `<div class="card"><strong>${esc(x.name)}</strong> <span class="meta">${esc(x.date)} · ${esc(x.kind)}${x.also.length ? ' · also as ' + esc(x.also.join(', ')) : ''}</span>
+      const card = x => `<div class="card"><strong>${esc(x.name)}</strong> <span class="meta">${esc(x.date)} · ${x.kind === 'about this deal' ? 'related' : 'mentioned'}${x.also.length ? ' · also as ' + esc(x.also.join(', ')) : ''}</span>
       ${x.link ? ` · <a href="${esc(x.link)}" target="_blank" rel="noopener">open on the server</a>` : ''}
       ${x.path ? `<div class="why" title="Copy into File Explorer if the link does not open">${esc(x.path)}</div>` : ''}
       <div class="why">${esc(x.excerpt)}${x.excerpt.length >= 300 ? '…' : ''}</div></div>`;
       const own = d.docs.filter(x => x.kind === 'about this deal'), other = d.docs.filter(x => x.kind !== 'about this deal');
-      return (own.map(card).join('') || '<p class="none">No indexed server documents filed under this deal yet.</p>') +
-        (other.length ? `<details style="margin-top:6px"><summary>${other.length} other document(s) that only mention it (reports, newsletters)</summary>${other.map(card).join('')}</details>` : '');
-    })()}
-    <h3>Contacts (${d.contacts.length})</h3>
-    ${d.contacts.map(c => `<div class="meta">${esc(c.name)}${c.job ? ' · ' + esc(c.job) : ''} · ${esc(c.email)}</div>`).join('') || '<p class="none">None in Notion.</p>'}`;
+      if (!own.length) {
+        // nothing filed under the deal's name: show the mentions directly, not behind another fold
+        return other.length ? `<p class="none">No related document yet. ${other.length} mentioned (reports, newsletters):</p>${other.map(card).join('')}`
+                            : '<p class="none">No related or mentioned server document yet.</p>';
+      }
+      return own.map(card).join('') +
+        (other.length ? `<details style="margin-top:6px"><summary>${other.length} mentioned (reports, newsletters)</summary>${other.map(card).join('')}</details>` : '');
+    })()}</details>
+    <details class="sec"><summary>Contacts (${d.contacts.length})</summary>
+    ${d.contacts.map(c => `<div class="meta">${esc(c.name)}${c.job ? ' · ' + esc(c.job) : ''} · ${esc(c.email)}</div>`).join('') || '<p class="none">None in Notion.</p>'}</details>`;
   $('detail').scrollTop = 0;
   history.replaceState(null, '', '#' + encodeURIComponent(id));
 }
 $('fShow').value = DATA.deals.some(d => d.hasSummary) ? 'summary' : 'mail'; $('q').value = '';
+$('chatLink').href = CHAT;
+// the chat in a panel on this page (when served by the chat program); opened as a file, links go to the chat page
+if (location.protocol.startsWith('http')) {
+  const panel = document.createElement('div'); panel.id = 'chatpanel';
+  panel.innerHTML = '<div class="bar"><b id="chattitle">Ask about a deal</b><a id="chatfull" href="/" target="_blank">open full page &#8599;</a>' +
+                    '<span class="x" id="chatclose" title="Close">&times;</span></div><iframe id="chatframe" title="Chat"></iframe>';
+  document.body.appendChild(panel);
+  const openChat = (dealId, dealName) => {
+    const q = new URLSearchParams({embed: 1}); if (dealId) q.set('deal', dealId);
+    const src = '/?' + q.toString();
+    if ($('chatframe').getAttribute('src') !== src) $('chatframe').setAttribute('src', src);
+    $('chattitle').textContent = dealName ? 'Ask about: ' + dealName : 'Ask about a deal';
+    $('chatfull').href = '/' + (dealId ? '?deal=' + encodeURIComponent(dealId) : '');
+    panel.classList.add('open');
+  };
+  $('chatLink').addEventListener('click', e => { e.preventDefault(); openChat('', ''); });
+  document.addEventListener('click', e => { const a = e.target.closest('a.askdeal'); if (!a) return;
+    e.preventDefault(); openChat(a.dataset.deal, a.dataset.name); });
+  $('chatclose').onclick = () => panel.classList.remove('open');
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') panel.classList.remove('open'); });
+}
 const wanted = decodeURIComponent(location.hash.slice(1));
 if (wanted && (wanted === '__loose' || DATA.deals.some(d => d.id === wanted))) current = wanted;
-['q', 'fShow'].forEach(id => ['input', 'change'].forEach(ev => $(id).addEventListener(ev, () => { current = null; renderList(); })));
+['q', 'fShow', 'fSector', 'fProj'].forEach(id => ['input', 'change'].forEach(ev => $(id).addEventListener(ev, () => { current = null; renderList(); })));
 renderList();
 </script></body></html>"""
 

@@ -44,5 +44,6 @@
       "2048"
     ]
   },
-  "server_db_dir": "/home/josephridge/proparco-work/sectors"
+  "server_db_dir": "/home/josephridge/proparco-work/sectors",
+  "sdrive_link_base": "S:\\Proparco"
 }
