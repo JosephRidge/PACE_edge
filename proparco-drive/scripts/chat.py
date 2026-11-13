@@ -524,7 +524,7 @@ $('histbtn').onclick = openHistory; $('histclose').onclick = () => $('hist').cla
 $('hist').addEventListener('click', e => { if (e.target.id === 'hist') $('hist').classList.remove('open'); });
 // a soft two-tone beep when an answer is complete (on by default; the choice is remembered)
 let soundOn = true; try { soundOn = localStorage.getItem('chatSound') !== 'off'; } catch (e) {}
-const showSound = () => $('sound').textContent = soundOn ? 'Sound on' : 'Sound off';
+const showSound = () => $('sound').textContent = soundOn ? '🔔 Sound on' : '🔕 Sound off';
 showSound(); $('sound').onclick = () => { soundOn = !soundOn; try { localStorage.setItem('chatSound', soundOn ? 'on' : 'off'); } catch (e) {} showSound(); };
 let audio = null;
 function beep() {
@@ -687,6 +687,43 @@ def restore_archive(cfg, name):
     return {"ok": True, "deal": turns[0].get("deal") or "", "count": len(turns)}
 
 
+# ================================================================ approvals (recorded locally; nothing sent)
+
+def set_approval(cfg, project_id, action, checked=False):
+    """Record that the current user approves a deal's proposed Notion update, or undo it. Only a
+    proposal that is not flagged 'needs review' can be approved. The approval names the proposal's
+    version (its creation time), so a later re-run is never covered by an earlier approval.
+    Nothing is sent to Notion: the push, when built, will send approved updates only."""
+    import getpass
+    path = cfg["_data_dir"] / "db" / "proparco.db"
+    db = sqlite3.connect(path)
+    try:
+        r = db.execute("SELECT created_at, review_status, deal_name FROM deal_proposals WHERE project_id = ?",
+                       (project_id,)).fetchone()
+        if not r:
+            return {"ok": False, "message": "No proposal for this deal."}
+        db.execute("""CREATE TABLE IF NOT EXISTS deal_approvals (project_id TEXT PRIMARY KEY, deal_name TEXT,
+                      proposal_created TEXT, approved_by TEXT, approved_at TEXT, after_checking INTEGER DEFAULT 0)""")
+        if "after_checking" not in {c[1] for c in db.execute("PRAGMA table_info(deal_approvals)")}:
+            db.execute("ALTER TABLE deal_approvals ADD COLUMN after_checking INTEGER DEFAULT 0")
+        if action == "undo":
+            db.execute("DELETE FROM deal_approvals WHERE project_id = ?", (project_id,))
+            db.commit()
+            return {"ok": True, "message": "Approval removed."}
+        flagged = r[1] == "needs_review"
+        if flagged and not checked:
+            return {"ok": False, "message": "This proposal is flagged for review: check the flagged items, tick the box, then approve."}
+        who = getpass.getuser()
+        at = time.strftime("%Y-%m-%d %H:%M")
+        db.execute("""INSERT OR REPLACE INTO deal_approvals (project_id, deal_name, proposal_created, approved_by,
+                      approved_at, after_checking) VALUES (?,?,?,?,?,?)""", (project_id, r[2], r[0], who, at, 1 if flagged else 0))
+        db.commit()
+        print(f"  approved by {who}: {r[2]} (not sent to Notion)", flush=True)
+        return {"ok": True, "message": f"Approved by {who} at {at}.", "by": who, "at": at}
+    finally:
+        db.close()
+
+
 # ================================================================ full source, on demand
 
 def full_source(cfg, deals, t, ident, db_label=""):
@@ -792,6 +829,14 @@ def make_handler(cfg, eng, deals):
                                      "application/json")
                 except Exception as err:
                     return self.send(200, json.dumps({"title": "Could not open", "text": str(err)}), "application/json")
+            if url.path == "/api/approve":
+                qs = urllib.parse.parse_qs(url.query)
+                g = lambda k: (qs.get(k) or [""])[0]
+                try:
+                    return self.send(200, json.dumps(set_approval(cfg, g("deal"), g("action") or "approve", g("checked") == "1")),
+                                     "application/json")
+                except Exception as err:
+                    return self.send(200, json.dumps({"ok": False, "message": f"Could not record: {err}"}), "application/json")
             if url.path == "/api/conversations":
                 return self.send(200, json.dumps(list_conversations(cfg), ensure_ascii=False), "application/json")
             if url.path in ("/api/archive", "/api/archive/restore"):

@@ -246,7 +246,12 @@ def deal_proposal(r):
             "flags": [f.get("claim", "") if f.get("check") == "notion_outdated"
                       else f"{f.get('check')}: {f.get('claim')}"
                       for f in _json_list(r.get("verification")) if f.get("review")],
-            "created": (r.get("created_at") or "")[:16].replace("T", " ")}
+            "created": (r.get("created_at") or "")[:16].replace("T", " "),
+            # the user's approval, valid only for the proposal version it was given to
+            "approval": ({"by": r["_approval"]["approved_by"], "at": r["_approval"]["approved_at"],
+                          "checked": bool(r["_approval"].get("after_checking")),
+                          "current": r["_approval"]["proposal_created"] == r.get("created_at")}
+                         if r.get("_approval") else None)}
 
 
 def summariser_note(cfg):
@@ -336,6 +341,10 @@ def build(cfg, include_all=False, quiet=False):
         pdb = read_db(cfg["_data_dir"] / "db" / "proparco.db")
         if pdb.execute("SELECT 1 FROM sqlite_master WHERE name = 'deal_proposals'").fetchone():
             deal_props = {r["project_id"]: dict(r) for r in pdb.execute("SELECT * FROM deal_proposals")}
+            if pdb.execute("SELECT 1 FROM sqlite_master WHERE name = 'deal_approvals'").fetchone():
+                for a in pdb.execute("SELECT * FROM deal_approvals"):
+                    if a["project_id"] in deal_props:
+                        deal_props[a["project_id"]]["_approval"] = dict(a)
         pdb.close()
     except sqlite3.Error:
         pass
@@ -502,6 +511,9 @@ border:1px solid var(--accent);color:var(--accent);text-decoration:none;font-wei
 #chatpanel .bar b{flex:1}#chatpanel iframe{flex:1;border:0;width:100%}#chatpanel .x{cursor:pointer;font-size:20px;line-height:1;padding:0 6px}
 .chatbtn{display:inline-block;margin-left:10px;padding:4px 12px;border-radius:8px;border:1px solid currentColor;text-decoration:none;font-weight:600;font-size:13px}
 details.sec{margin-top:14px;border-top:1px solid #8883;padding-top:8px}details.sec>summary{font-weight:700;font-size:15px;cursor:pointer;list-style-position:outside}details.sec[open]>summary{margin-bottom:6px}
+.upd .verdict{margin:6px 0 8px;font-weight:600}.upd.ready .verdict{color:#2f9e44}.upd.wait .verdict{color:#e8590c}.upd.none .verdict{color:#777}.updt{width:100%;border-collapse:collapse;font-size:13.5px}.updt th,.updt td{vertical-align:top;text-align:left;padding:6px;border-top:1px solid #8883}.updt th:first-child{width:150px}.updt mark{background:#d3f9d8;color:inherit;padding:0 2px;border-radius:3px}@media (prefers-color-scheme:dark){.updt mark{background:#1f4d2b}}.updt a.copy{font-size:12px;font-weight:600}
+.upd .updtitle{display:inline-block;background:#fff4e6;color:#d9480f;border:1px solid #ffa94d;border-radius:8px;padding:3px 10px}@media (prefers-color-scheme:dark){.upd .updtitle{background:#3b2410;color:#ffa94d}}.upd .action{margin:8px 0 10px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}button.approve{font:inherit;font-weight:700;border:0;border-radius:9px;padding:8px 16px;background:#2f9e44;color:#fff;cursor:pointer}button.approve:disabled{background:#adb5bd;cursor:default}.upd .approved{color:#2f9e44;font-weight:600}.upd .approved a{margin-left:8px;font-weight:400}
+.approvebtn{display:inline-block;font:inherit;font-weight:600;font-size:13px;padding:4px 12px;border-radius:8px;border:1px solid #2f9e44;background:transparent;color:#2f9e44;cursor:pointer}.approvebtn:hover:not(:disabled){background:#2f9e44;color:#fff}.approvebtn:disabled{border-color:#adb5bd;color:#adb5bd;cursor:default}.upd .chk{display:flex;gap:6px;align-items:center;font-size:13px}
 </style></head><body>
 <header><h1>Deals: emails and documents</h1>
 <input type="search" id="q" placeholder="Search: deal, project ID, counterparty, contact, email subject…">
@@ -519,6 +531,87 @@ const $ = id => document.getElementById(id);
 // served by the chat program (http): links stay on the same address; opened as a file: the chat's usual address
 const CHAT = location.protocol.startsWith('http') ? '/' : 'http://127.0.0.1:8765/';
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+// ---- "Can we update Notion now?": Notion now, the proposed record after the update, and what changes
+function notionUpdate(d, p) {
+  if (!p || p.kind !== 'deal') return '';
+  const n = d.notion || {}, norm = x => (x || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const lines = x => (x || '').split('\n').map(l => l.replace(/^\s*[-•]\s*/, '').trim()).filter(Boolean);
+  // 1. latest deal description: Notion's text kept word for word, the new facts appended
+  const latestNew = (n.latest || '').trim() && p.added ? esc(n.latest.trim()) + ' <mark>' + esc(p.added) + '</mark>' : (p.added ? '<mark>' + esc(p.latest) + '</mark>' : para(n.latest));
+  const latestChange = p.added ? 'Updated: new facts added at the end' : 'No change';
+  // 2. history: Notion's history kept, the agent's dated entries appended
+  const hAdd = lines(p.history);
+  const histNew = (n.history || '').trim() || !hAdd.length
+    ? [para(n.history), ...hAdd.map(h => '<mark>' + esc(h) + '</mark>')].join('<br>')
+    : hAdd.map(h => '<mark>' + esc(h) + '</mark>').join('<br>');
+  const histChange = hAdd.length ? `Added: ${hAdd.length} dated entr${hAdd.length > 1 ? 'ies' : 'y'}` : 'No change';
+  // 3. next steps: Notion's steps kept (done ones ticked), new ones added
+  const noStep = x => /^no (outstanding|open|further|new) (actions?|steps?)/i.test(x.replace(/^[-•✓]\s*/, ''));
+  const nOld = lines(n.next).filter(x => !noStep(x)).map(norm), steps = lines(p.next).filter(x => !noStep(x));
+  const done = steps.filter(x => x.startsWith('✓')).length;
+  const added = steps.filter(x => !x.startsWith('✓') && !nOld.includes(norm(x.split(' — ')[0])));
+  const stepsNew = steps.map(x => x.startsWith('✓') ? '<s>' + esc(x.replace(/^✓\s*/, '')) + '</s> ✓ done'
+                                   : (added.includes(x) ? '<mark>' + esc(x) + '</mark>' : esc(x))).join('<br>') || para('');
+  const stepsChange = [done ? `${done} marked done` : '', added.length ? `${added.length} added` : ''].filter(Boolean).join(', ') || 'No change';
+  const changed = !!(p.added || hAdd.length || done || added.length);
+  const verdict = !changed ? ['none', 'Nothing to update: Notion already reflects what the emails and documents say.']
+    : (p.review || (p.flags && p.flags.length)) ? ['wait', 'Not yet: check the flagged item(s) below first' + (p.flags && p.flags.length ? ': ' + p.flags.map(esc).join(' · ') : '.')]
+    : ['ready', 'Yes, ready: the changes below are supported by the cited emails and documents.'];
+  // plain text after the update, for copying into Notion by hand until the automatic push exists
+  const txt = {
+    latest: ((n.latest || '').trim() + (p.added ? ' ' + p.added : '')).trim(),
+    history: [(n.history || '').trim(), ...hAdd].filter(Boolean).join('\n'),
+    next: steps.map(x => x.startsWith('✓') ? x.replace(/^✓\s*/, '') + ' (done)' : x.replace(/^[-•]\s*/, '')).join('\n'),
+  };
+  window.__copy = window.__copy || {}; window.__copy[d.id] = txt;
+  const row = (label, now, after, change, key) => `<tr><th>${label}</th><td>${now}</td><td>${after}</td>
+     <td>${esc(change)}${change !== 'No change' ? `<div><a href="#" class="copy" data-deal="${esc(d.id)}" data-k="${key}">Copy</a></div>` : ''}</td></tr>`;
+  const live = location.protocol.startsWith('http'), ap = p.approval;
+  let action;
+  if (ap && ap.current) {
+    action = `<div class="approved">✓ Approved by ${esc(ap.by)} on ${esc(ap.at)}${ap.checked ? ', after checking the flagged items' : ''} · not sent to Notion yet: the push will send approved updates only.
+      <a href="#" class="apv" data-deal="${esc(d.id)}" data-action="undo">Undo</a></div>`;
+  } else if (verdict[0] === 'ready') {
+    action = `<button class="apv approvebtn" data-deal="${esc(d.id)}" data-action="approve" ${live ? '' : 'disabled title="Open the deal page from the app to approve"'}>Approve this update &#10003;</button>
+      <span class="meta">The changes below are supported by the cited emails and documents.</span>` +
+      (ap ? `<div class="meta">An earlier version of this proposal was approved by ${esc(ap.by)} on ${esc(ap.at)}; this one is new.</div>` : '');
+  } else if (verdict[0] === 'wait') {
+    action = `<div class="verdict">${verdict[1]}</div>
+      <label class="chk"><input type="checkbox" class="checked-box" data-deal="${esc(d.id)}" ${live ? '' : 'disabled'}>
+        I have checked the flagged item(s) against the sources</label>
+      <button class="apv approvebtn" data-deal="${esc(d.id)}" data-action="approve" data-checked="1" disabled
+        title="Tick the box once you have checked the flagged items">Approve this update &#10003;</button>` +
+      (ap ? `<div class="meta">An earlier version of this proposal was approved by ${esc(ap.by)} on ${esc(ap.at)}; this one is new.</div>` : '');
+  } else {
+    action = `<div class="verdict">${verdict[1]}</div>`;
+  }
+  return `<div class="card upd ${verdict[0]}"><strong class="updtitle">Can we update Notion now?</strong>
+    <div class="action">${action}</div>
+    <table class="updt"><tr><th></th><th>In Notion now</th><th>After the update <span class="meta">(added parts highlighted)</span></th><th>What changes</th></tr>
+    ${row('Latest deal description', para(n.latest), latestNew, latestChange, 'latest')}
+    ${row('History of discussions', para(n.history), histNew || para(''), histChange, 'history')}
+    ${row('Next steps', para(n.next), stepsNew, stepsChange, 'next')}</table>
+    <p class="meta">Nothing is sent to Notion: the automatic update comes next, with approval per field. Until then, "Copy" gives the text after the update, to paste into Notion by hand.</p></div>`;
+}
+document.addEventListener('click', async e => {
+  const b = e.target.closest('.apv'); if (!b) return; e.preventDefault();
+  if (b.dataset.action === 'approve' && !confirm('Approve this update? It is recorded on this laptop; nothing is sent to Notion yet.')) return;
+  const q = {deal: b.dataset.deal, action: b.dataset.action}; if (b.dataset.checked) q.checked = '1';
+  const r = await (await fetch('/api/approve?' + new URLSearchParams(q))).json();
+  if (!r.ok) { alert(r.message); return; }
+  location.reload();
+});
+document.addEventListener('change', e => {
+  const c = e.target.closest('.checked-box'); if (!c) return;
+  const b = c.closest('.action').querySelector('.approvebtn'); if (b) b.disabled = !c.checked;
+});
+document.addEventListener('click', e => {
+  const a = e.target.closest('a.copy'); if (!a) return; e.preventDefault();
+  const t = ((window.__copy || {})[a.dataset.deal] || {})[a.dataset.k] || '';
+  const done = () => { a.textContent = 'Copied'; setTimeout(() => a.textContent = 'Copy', 1500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, () => { prompt('Copy this text:', t); });
+  else prompt('Copy this text:', t);
+});
 const para = s => (s && s.trim()) ? esc(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>') : '<span class="none">(empty)</span>';
 let current = null;
 function items() {
@@ -672,6 +765,7 @@ function show(id) {
     <p class="meta">Read-only view: nothing has been sent to Notion. Updating Notion will happen only after approval.
       <a class="chatbtn askdeal" data-deal="${esc(d.id)}" data-name="${esc(d.name)}" href="${CHAT}?deal=${encodeURIComponent(d.id)}">Ask about this deal &rarr;</a></p>
     ${dealCard}
+    ${notionUpdate(d, p)}
     ${st.state === 'running' ? `<div style="margin-top:8px">${statusHtml(st)}</div>` : ''}
     ${(() => {
       const best = d.threads.filter(t => t.best), alt = d.threads.filter(t => !t.best);
